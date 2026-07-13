@@ -50,16 +50,18 @@ def upload_image(token: str, image_path: str) -> str:
 
 
 def md_to_wechat_html(md_path: str) -> str:
-    """将 Markdown 转为微信公众号兼容的 HTML"""
+    """将 Markdown 转为微信公众号兼容的移动端 HTML"""
+    import re
+
     with open(md_path, "r", encoding="utf-8") as f:
         md_content = f.read()
-    
+
     # 去掉 YAML frontmatter
     if md_content.startswith("---"):
         parts = md_content.split("---", 2)
         if len(parts) >= 3:
             md_content = parts[2].strip()
-    
+
     # 用 markdown 库转换
     extensions = [
         "markdown.extensions.fenced_code",
@@ -67,13 +69,117 @@ def md_to_wechat_html(md_path: str) -> str:
         "markdown.extensions.tables",
         "markdown.extensions.toc",
     ]
-    html = markdown.markdown(md_content, extensions=extensions)
-    
-    # 微信公众平台 HTML 兼容性处理
-    # - 代码块用 <pre><code>
-    # - 表格用标准 table 标签
-    # - 避免使用微信不支持的 CSS
-    return html
+    raw = markdown.markdown(md_content, extensions=extensions)
+
+    # ── 微信公众平台移动端适配 ────────────────────
+    # WeChat 会剥离 <style> 和外链 CSS，所以所有样式必须 inline
+
+    # 容器：整体 padding + 字体基础
+    wrap = '<section style="padding: 8px 14px; font-size: 17px; line-height: 1.75; color: #333; max-width: 100%; overflow-x: hidden; word-wrap: break-word;">'
+
+    # 处理标题：h1/h2/h3 + 内联样式
+    raw = re.sub(
+        r'<h(\d)([^>]*)>(.*?)</h\1>',
+        lambda m: {
+            1: f'<h1 style="font-size: 22px; font-weight: 700; color: #1a1a1a; margin: 24px 0 12px; padding: 0 0 8px; border-bottom: 2px solid #3866FF;">{m.group(3)}</h1>',
+            2: f'<h2 style="font-size: 19px; font-weight: 700; color: #1a1a1a; margin: 20px 0 10px; padding-left: 10px; border-left: 3px solid #3866FF;">{m.group(3)}</h2>',
+            3: f'<h3 style="font-size: 17px; font-weight: 700; color: #333; margin: 16px 0 8px;">{m.group(3)}</h3>',
+        }.get(int(m.group(1)), m.group(0)),
+        raw,
+    )
+
+    # 段落 + 内联样式
+    raw = re.sub(
+        r'<p>(.*?)</p>',
+        r'<p style="margin: 10px 0; font-size: 17px; line-height: 1.75; color: #333;">\1</p>',
+        raw,
+        flags=re.DOTALL,
+    )
+
+    # 代码块：移动端可横向滚动 + 圆角 + 深色背景
+    raw = re.sub(
+        r'<pre>(.*?)</pre>',
+        r'<pre style="background: #1e1e1e; color: #d4d4d4; border-radius: 6px; padding: 14px; font-size: 14px; line-height: 1.5; overflow-x: auto; white-space: pre; -webkit-overflow-scrolling: touch; margin: 12px 0;">\1</pre>',
+        raw,
+        flags=re.DOTALL,
+    )
+
+    # 行内代码：浅灰背景 + 圆角
+    raw = re.sub(
+        r'<code>(.*?)</code>',
+        lambda m: (
+            f'<code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 15px; font-family: Menlo, Consolas, monospace;">{m.group(1)}</code>'
+            if not m.group(0).startswith("<pre")
+            else m.group(0)
+        ),
+        raw,
+    )
+
+    # 表格：响应式 + 边线 + 斑马纹
+    raw = re.sub(
+        r'<table>',
+        r'<div style="overflow-x: auto; -webkit-overflow-scrolling: touch; margin: 12px 0;"><table style="width: 100%; border-collapse: collapse; font-size: 15px; white-space: nowrap;">',
+        raw,
+    )
+    raw = re.sub(r'</table>', r'</table></div>', raw)
+    raw = re.sub(
+        r'<th>',
+        r'<th style="background: #3866FF; color: #fff; padding: 8px 10px; border: 1px solid #ddd; text-align: left; font-weight: 600;">',
+        raw,
+    )
+    raw = re.sub(
+        r'<td>',
+        r'<td style="padding: 8px 10px; border: 1px solid #ddd;">',
+        raw,
+    )
+
+    # 引用块：左侧蓝条
+    raw = re.sub(
+        r'<blockquote>(.*?)</blockquote>',
+        r'<blockquote style="margin: 14px 0; padding: 12px 16px; background: #f5f7fa; border-left: 4px solid #3866FF; color: #555; font-size: 15px; line-height: 1.7; border-radius: 0 4px 4px 0;">\1</blockquote>',
+        raw,
+        flags=re.DOTALL,
+    )
+
+    # 无序/有序列表
+    raw = re.sub(
+        r'<ul>',
+        r'<ul style="margin: 8px 0; padding-left: 22px; font-size: 17px; line-height: 1.75;">',
+        raw,
+    )
+    raw = re.sub(
+        r'<ol>',
+        r'<ol style="margin: 8px 0; padding-left: 22px; font-size: 17px; line-height: 1.75;">',
+        raw,
+    )
+    raw = re.sub(
+        r'<li>(.*?)</li>',
+        r'<li style="margin: 4px 0; color: #333;">\1</li>',
+        raw,
+    )
+
+    # 粗体
+    raw = re.sub(
+        r'<strong>(.*?)</strong>',
+        r'<strong style="font-weight: 700; color: #1a1a1a;">\1</strong>',
+        raw,
+    )
+
+    # 图片：自适应 + 圆角
+    raw = re.sub(
+        r'<img([^>]*)>',
+        r'<img\1 style="max-width: 100%; height: auto; border-radius: 6px; margin: 12px 0; display: block;">',
+        raw,
+    )
+
+    # 水平线
+    raw = re.sub(
+        r'<hr\s*/>',
+        r'<hr style="border: none; border-top: 1px solid #e0e0e0; margin: 20px 0;">',
+        raw,
+    )
+
+    return wrap + raw + "</section>"
 
 
 def add_draft(token: str, title: str, author: str, digest: str, 
