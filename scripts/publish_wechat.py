@@ -159,15 +159,15 @@ def md_to_wechat_html(md_path: str) -> str:
         flags=re.DOTALL,
     )
 
-    # 无序/有序列表
+    # 无序/有序列表：WeChat 丢弃默认 list-style，必须显式声明
     raw = re.sub(
         r'<ul>',
-        r'<ul style="margin: 8px 0; padding-left: 22px; font-size: 17px; line-height: 1.75;">',
+        r'<ul style="margin: 8px 0; padding-left: 28px; font-size: 17px; line-height: 1.75; list-style-type: disc; list-style-position: outside;">',
         raw,
     )
     raw = re.sub(
         r'<ol>',
-        r'<ol style="margin: 8px 0; padding-left: 22px; font-size: 17px; line-height: 1.75;">',
+        r'<ol style="margin: 8px 0; padding-left: 30px; font-size: 17px; line-height: 1.75; list-style-type: decimal; list-style-position: outside;">',
         raw,
     )
     raw = re.sub(
