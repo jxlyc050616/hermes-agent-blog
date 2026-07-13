@@ -170,11 +170,16 @@ def md_to_wechat_html(md_path: str) -> str:
         raw,
     )
 
-    # 粗体：保持微信原生加粗，不加额外颜色
-    # display: inline 防止在 li 内被断行成两个"点"
+    # 粗体：换成 <span> 彻底避开微信原生 <strong> 的 block 样式
+    # 微信可能强制 strong { display: block }，Inline !important 不如换标签
     raw = re.sub(
         r'<strong>',
-        r'<strong style="display: inline;">',
+        r'<span style="font-weight: bold;">',
+        raw,
+    )
+    raw = re.sub(
+        r'</strong>',
+        r'</span>',
         raw,
     )
     # 图片：微信原生已处理 max-width，只加圆角
