@@ -73,9 +73,10 @@ def md_to_wechat_html(md_path: str) -> str:
 
     # ── 微信公众平台移动端适配 ────────────────────
     # WeChat 会剥离 <style> 和外链 CSS，所以所有样式必须 inline
+    # WeChat 移动端 WebView 对 overflow 支持不稳定，需要用 div 包裹
 
-    # 容器：整体 padding + 字体基础
-    wrap = '<section style="padding: 8px 14px; font-size: 17px; line-height: 1.75; color: #333; max-width: 100%; overflow-x: hidden; word-wrap: break-word;">'
+    # 容器：整体 padding + 字体基础（容器本身也要 overflow 兜底）
+    wrap = '<section style="padding: 8px 14px; font-size: 17px; line-height: 1.75; color: #333; max-width: 100%; overflow: auto; word-wrap: break-word;">'
 
     # 处理标题：h1/h2/h3 + 内联样式
     raw = re.sub(
@@ -96,24 +97,41 @@ def md_to_wechat_html(md_path: str) -> str:
         flags=re.DOTALL,
     )
 
-    # 代码块：移动端可横向滚动 + 圆角 + 深色背景
-    raw = re.sub(
-        r'<pre>(.*?)</pre>',
-        r'<pre style="background: #1e1e1e; color: #d4d4d4; border-radius: 6px; padding: 14px; font-size: 14px; line-height: 1.5; overflow-x: auto; white-space: pre; -webkit-overflow-scrolling: touch; margin: 12px 0;">\1</pre>',
-        raw,
-        flags=re.DOTALL,
-    )
-
-    # 行内代码：浅灰背景 + 圆角
+    # ── 行内代码：先处理（独立 <code>，不在 <pre> 内的）────
+    # 先用占位符保护 <pre> 内的 <code>
+    PRE_MARKER = "║║║PREBLOCK║║║"
+    pre_blocks = []
+    
+    def _save_pre(m):
+        pre_blocks.append(m.group(0))
+        return f"{PRE_MARKER}{len(pre_blocks)-1}{PRE_MARKER}"
+    
+    raw = re.sub(r'<pre>.*?</pre>', _save_pre, raw, flags=re.DOTALL)
+    
+    # 现在所有 <code> 都是行内代码
     raw = re.sub(
         r'<code>(.*?)</code>',
-        lambda m: (
-            f'<code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 15px; font-family: Menlo, Consolas, monospace;">{m.group(1)}</code>'
-            if not m.group(0).startswith("<pre")
-            else m.group(0)
-        ),
+        r'<code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 15px; font-family: Menlo, Consolas, monospace;">\1</code>',
         raw,
     )
+    
+    # ── 代码块：还原并加上双层可滚动结构 ────────
+    # WeChat 移动版经常忽略 <pre> 上的 overflow-x，用外层 <div> 兜底
+    for i, block in enumerate(pre_blocks):
+        # 去掉 <pre> 和 </pre> 标签，取中间内容
+        inner = re.sub(r'^<pre[^>]*>(.*)</pre>$', r'\1', block, flags=re.DOTALL)
+        wrapped = (
+            '<div style="overflow-x: auto; overflow-y: hidden; -webkit-overflow-scrolling: touch; '
+            'margin: 12px 0; border-radius: 6px; max-width: 100%;">'
+            '<pre style="background: #1e1e1e; color: #d4d4d4; padding: 14px; '
+            'font-size: 13px; line-height: 1.45; white-space: pre; '
+            'font-family: Menlo, Consolas, Courier, monospace; margin: 0; '
+            'min-width: min-content;">'
+            f'{inner}'
+            '</pre>'
+            '</div>'
+        )
+        raw = raw.replace(f"{PRE_MARKER}{i}{PRE_MARKER}", wrapped)
 
     # 表格：响应式 + 边线 + 斑马纹
     raw = re.sub(
