@@ -72,27 +72,28 @@ def md_to_wechat_html(md_path: str) -> str:
     raw = markdown.markdown(md_content, extensions=extensions)
 
     # ── 微信公众平台移动端适配 ────────────────────
-    # WeChat 会剥离 <style> 和外链 CSS，所以所有样式必须 inline
+    # 参考：GitHubDaily 公众号风格 (15px字体, 0.1em字距, 青绿色标题)
+    # WeChat 会剥离 <style> 和外链 CSS，所有样式必须 inline
     # WeChat 移动端 WebView 对 overflow 支持不稳定，需要用 div 包裹
 
     # 容器：整体 padding + 字体基础（容器本身也要 overflow 兜底）
-    wrap = '<section style="padding: 8px 14px; font-size: 17px; line-height: 1.75; color: #333; max-width: 100%; overflow: auto; word-wrap: break-word;">'
+    wrap = '<section style="padding: 8px 14px; font-size: 15px; line-height: 1.8; color: #333; max-width: 100%; overflow: auto; word-wrap: break-word; font-family: -apple-system, BlinkMacSystemFont, &quot;Helvetica Neue&quot;, Helvetica, Arial, sans-serif; letter-spacing: 0.05em;">'
 
-    # 处理标题：h1/h2/h3 + 内联样式
+    # 处理标题：h1/h2/h3 + 内联样式（参考：青绿色h3，扁平化）
     raw = re.sub(
         r'<h(\d)([^>]*)>(.*?)</h\1>',
         lambda m: {
-            1: f'<h1 style="font-size: 22px; font-weight: 700; color: #1a1a1a; margin: 24px 0 12px; padding: 0 0 8px; border-bottom: 2px solid #3866FF;">{m.group(3)}</h1>',
-            2: f'<h2 style="font-size: 19px; font-weight: 700; color: #1a1a1a; margin: 20px 0 10px; padding-left: 10px; border-left: 3px solid #3866FF;">{m.group(3)}</h2>',
-            3: f'<h3 style="font-size: 17px; font-weight: 700; color: #333; margin: 16px 0 8px;">{m.group(3)}</h3>',
+            1: f'<h1 style="font-size: 20px; font-weight: 700; color: #1a1a1a; margin: 24px 0 12px; padding: 0 0 8px; border-bottom: 2px solid #3866FF;">{m.group(3)}</h1>',
+            2: f'<h2 style="font-size: 18px; font-weight: 700; color: #1a1a1a; margin: 20px 0 10px; padding-left: 10px; border-left: 3px solid #3866FF;">{m.group(3)}</h2>',
+            3: f'<h3 style="font-size: 16px; font-weight: 700; color: rgb(0, 181, 173); margin: 1.2em 0 0.5em; padding: 5px 0;">{m.group(3)}</h3>',
         }.get(int(m.group(1)), m.group(0)),
         raw,
     )
 
-    # 段落 + 内联样式
+    # 段落 + 内联样式（参考：15px, 1.8em行高, 0.1em字距）
     raw = re.sub(
         r'<p>(.*?)</p>',
-        r'<p style="margin: 10px 0; font-size: 17px; line-height: 1.75; color: #333;">\1</p>',
+        r'<p style="margin: 1.5em 0; font-size: 15px; line-height: 1.8; color: #333; letter-spacing: 0.1em;">\1</p>',
         raw,
         flags=re.DOTALL,
     )
@@ -159,27 +160,27 @@ def md_to_wechat_html(md_path: str) -> str:
         flags=re.DOTALL,
     )
 
-    # 无序/有序列表：WeChat 丢弃默认 list-style，必须显式声明
+    # 无序/有序列表（参考：14px, padding-left 15px）
     raw = re.sub(
         r'<ul>',
-        r'<ul style="margin: 8px 0; padding-left: 28px; font-size: 17px; line-height: 1.75; list-style-type: disc; list-style-position: outside;">',
+        r'<ul style="margin: 0.8em 0; padding-left: 15px; font-size: 15px; line-height: 1.8; list-style-type: disc; list-style-position: outside;">',
         raw,
     )
     raw = re.sub(
         r'<ol>',
-        r'<ol style="margin: 8px 0; padding-left: 30px; font-size: 17px; line-height: 1.75; list-style-type: decimal; list-style-position: outside;">',
+        r'<ol style="margin: 0.8em 0; padding-left: 18px; font-size: 15px; line-height: 1.8; list-style-type: decimal; list-style-position: outside;">',
         raw,
     )
     raw = re.sub(
         r'<li>(.*?)</li>',
-        r'<li style="margin: 4px 0; color: #333;">\1</li>',
+        r'<li style="margin: 8px 0; color: #333; white-space: pre-wrap;">\1</li>',
         raw,
     )
 
-    # 粗体
+    # 粗体（参考：蓝色强调色 rgb(34, 107, 163)）
     raw = re.sub(
         r'<strong>(.*?)</strong>',
-        r'<strong style="font-weight: 700; color: #1a1a1a;">\1</strong>',
+        r'<strong style="font-weight: 700; color: rgb(34, 107, 163);">\1</strong>',
         raw,
     )
 
