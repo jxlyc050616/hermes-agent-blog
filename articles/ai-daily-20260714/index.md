@@ -1,9 +1,9 @@
 ---
-title: "AI 日报 2026.07.14：杀 Slop、说人话、拉片笔记——这周 GitHub 上的三个宝藏项目"
+title: "AI 日报 2026.07.14：杀 Slop、说人话、拉片笔记"
 date: 2026-07-14
 author: "小糊涂虫"
 tags: [AI日报, kill-ai-slop, speak-human-tw, 拉片笔记, ditto, AI设计, AI文案, GitHub热榜]
-description: "这周 GitHub 上最火的不是框架更新，而是三颗「反 AI 味」的新星：教你识别 AI 设计套路的 kill-ai-slop（389★/4天）、繁体中文去 AI 味改写 skill 說人話（466★/6天）、以及把电影变成结构化学拉片的 AI 工具拉片笔记（309★/6天）"
+description: "本周 GitHub 最火的三颗「反 AI 味」新星：kill-ai-slop、說人話、拉片笔记"
 ---
 
 # AI 日报 2026.07.14

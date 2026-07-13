@@ -217,9 +217,10 @@ def add_draft(token: str, title: str, author: str, digest: str,
     
     resp = requests.post(
         f"{API_BASE}/draft/add?access_token={token}",
-        json={"articles": [article]}
+        data=json.dumps({"articles": [article]}, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json; charset=utf-8"},
     )
-    data = resp.json()
+    data = json.loads(resp.content.decode("utf-8"))
     if "media_id" not in data:
         raise RuntimeError(f"新增草稿失败: {data}")
     print(f"✅ 草稿创建成功: {data['media_id']}")
