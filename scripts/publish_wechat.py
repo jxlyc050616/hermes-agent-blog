@@ -72,14 +72,14 @@ def md_to_wechat_html(md_path: str) -> str:
     raw = markdown.markdown(md_content, extensions=extensions)
 
     # ── 微信公众平台移动端适配 ────────────────────
-    # 参考：GitHubDaily 公众号风格 (15px字体, 0.1em字距, 青绿色标题)
-    # WeChat 会剥离 <style> 和外链 CSS，所有样式必须 inline
-    # WeChat 移动端 WebView 对 overflow 支持不稳定，需要用 div 包裹
+    # 关键原则：微信原生 CSS 已经处理了大部分排版，
+    # 我们只补微信会丢弃/缺失的部分，不跟原生样式打架。
+    # 参考：GitHubDaily 公众号（极简内联样式）
 
-    # 容器：整体 padding + 字体基础（容器本身也要 overflow 兜底）
-    wrap = '<section style="padding: 8px 14px; font-size: 15px; line-height: 1.8; color: #333; max-width: 100%; overflow: auto; word-wrap: break-word; font-family: -apple-system, BlinkMacSystemFont, &quot;Helvetica Neue&quot;, Helvetica, Arial, sans-serif; letter-spacing: 0.05em;">'
+    # 容器：不加 wrapper，直接用原生 rich_media_content
+    # 只补微信会丢弃的 list-style
 
-    # 处理标题：h1/h2/h3 + 内联样式（参考：青绿色h3，扁平化）
+    # 标题：h1/h2 加标识线，h3 加颜色提示
     raw = re.sub(
         r'<h(\d)([^>]*)>(.*?)</h\1>',
         lambda m: {
@@ -90,57 +90,49 @@ def md_to_wechat_html(md_path: str) -> str:
         raw,
     )
 
-    # 段落 + 内联样式（参考：15px, 1.8em行高, 0.1em字距）
+    # 段落：只留基本间距，不写死字号/字距（让微信原生控制）
     raw = re.sub(
         r'<p>(.*?)</p>',
-        r'<p style="margin: 1.5em 0; font-size: 15px; line-height: 1.8; color: #333; letter-spacing: 0.1em;">\1</p>',
+        r'<p style="margin: 1.5em 0;">\1</p>',
         raw,
         flags=re.DOTALL,
     )
 
-    # ── 行内代码：先处理（独立 <code>，不在 <pre> 内的）────
-    # 先用占位符保护 <pre> 内的 <code>
+    # ── 行内代码：先处理，用占位符保护 <pre> 块 ────
     PRE_MARKER = "║║║PREBLOCK║║║"
     pre_blocks = []
-    
     def _save_pre(m):
         pre_blocks.append(m.group(0))
         return f"{PRE_MARKER}{len(pre_blocks)-1}{PRE_MARKER}"
-    
     raw = re.sub(r'<pre>.*?</pre>', _save_pre, raw, flags=re.DOTALL)
-    
-    # 现在所有 <code> 都是行内代码
+
+    # 行内代码：微信原生无样式，标记背景色便于识别
     raw = re.sub(
         r'<code>(.*?)</code>',
-        r'<code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 15px; font-family: Menlo, Consolas, monospace;">\1</code>',
+        r'<code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">\1</code>',
         raw,
     )
-    
-    # ── 代码块：还原并加上双层可滚动结构 ────────
-    # WeChat 移动版经常忽略 <pre> 上的 overflow-x，用外层 <div> 兜底
+
+    # ── 代码块：只加深色背景，滚动靠微信原生 ────────
+    # 微信对 <pre> 的 overflow 支持不稳定，但深色背景可以显示
     for i, block in enumerate(pre_blocks):
-        # 去掉 <pre> 和 </pre> 标签，取中间内容
         inner = re.sub(r'^<pre[^>]*>(.*)</pre>$', r'\1', block, flags=re.DOTALL)
         wrapped = (
-            '<div style="overflow-x: auto; overflow-y: hidden; -webkit-overflow-scrolling: touch; '
-            'margin: 12px 0; border-radius: 6px; max-width: 100%;">'
             '<pre style="background: #1e1e1e; color: #d4d4d4; padding: 14px; '
             'font-size: 13px; line-height: 1.45; white-space: pre; '
-            'font-family: Menlo, Consolas, Courier, monospace; margin: 0; '
-            'min-width: min-content;">'
+            'font-family: Menlo, Consolas, Courier, monospace; '
+            'border-radius: 6px; overflow-x: auto; margin: 12px 0;">'
             f'{inner}'
             '</pre>'
-            '</div>'
         )
         raw = raw.replace(f"{PRE_MARKER}{i}{PRE_MARKER}", wrapped)
 
-    # 表格：响应式 + 边线 + 斑马纹
+    # 表格：只用基础边框，不包 div
     raw = re.sub(
         r'<table>',
-        r'<div style="overflow-x: auto; -webkit-overflow-scrolling: touch; margin: 12px 0;"><table style="width: 100%; border-collapse: collapse; font-size: 15px; white-space: nowrap;">',
+        r'<table style="border-collapse: collapse; width: 100%; font-size: 14px; margin: 12px 0;">',
         raw,
     )
-    raw = re.sub(r'</table>', r'</table></div>', raw)
     raw = re.sub(
         r'<th>',
         r'<th style="background: #3866FF; color: #fff; padding: 8px 10px; border: 1px solid #ddd; text-align: left; font-weight: 600;">',
@@ -152,53 +144,47 @@ def md_to_wechat_html(md_path: str) -> str:
         raw,
     )
 
-    # 引用块：左侧蓝条
+    # 引用块：左侧蓝条（微信原生无样式）
     raw = re.sub(
         r'<blockquote>(.*?)</blockquote>',
-        r'<blockquote style="margin: 14px 0; padding: 12px 16px; background: #f5f7fa; border-left: 4px solid #3866FF; color: #555; font-size: 15px; line-height: 1.7; border-radius: 0 4px 4px 0;">\1</blockquote>',
+        r'<blockquote style="margin: 14px 0; padding: 12px 16px; background: #f5f7fa; border-left: 4px solid #3866FF; color: #555; font-size: 14px; border-radius: 0 4px 4px 0;">\1</blockquote>',
         raw,
         flags=re.DOTALL,
     )
 
-    # 无序/有序列表（参考：14px, padding-left 15px）
+    # 列表：微信会丢弃 list-style，需要显式加上
     raw = re.sub(
         r'<ul>',
-        r'<ul style="margin: 0.8em 0; padding-left: 15px; font-size: 15px; line-height: 1.8; list-style-type: disc; list-style-position: outside;">',
+        r'<ul style="margin: 0.8em 0; padding-left: 20px; list-style-type: disc;">',
         raw,
     )
     raw = re.sub(
         r'<ol>',
-        r'<ol style="margin: 0.8em 0; padding-left: 18px; font-size: 15px; line-height: 1.8; list-style-type: decimal; list-style-position: outside;">',
+        r'<ol style="margin: 0.8em 0; padding-left: 20px; list-style-type: decimal;">',
         raw,
     )
     raw = re.sub(
         r'<li>(.*?)</li>',
-        r'<li style="margin: 8px 0; color: #333; white-space: pre-wrap;">\1</li>',
+        r'<li style="margin: 6px 0;">\1</li>',
         raw,
     )
 
-    # 粗体（参考：蓝色强调色 rgb(34, 107, 163)）
-    raw = re.sub(
-        r'<strong>(.*?)</strong>',
-        r'<strong style="font-weight: 700; color: rgb(34, 107, 163);">\1</strong>',
-        raw,
-    )
-
-    # 图片：自适应 + 圆角
+    # 粗体：保持微信原生加粗，不加额外颜色
+    # 图片：微信原生已处理 max-width，只加圆角
     raw = re.sub(
         r'<img([^>]*)>',
         r'<img\1 style="max-width: 100%; height: auto; border-radius: 6px; margin: 12px 0; display: block;">',
         raw,
     )
 
-    # 水平线
+    # 水平分割线
     raw = re.sub(
         r'<hr\s*/>',
         r'<hr style="border: none; border-top: 1px solid #e0e0e0; margin: 20px 0;">',
         raw,
     )
 
-    return wrap + raw + "</section>"
+    return raw
 
 
 def add_draft(token: str, title: str, author: str, digest: str, 
