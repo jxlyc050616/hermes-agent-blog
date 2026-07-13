@@ -153,6 +153,7 @@ def md_to_wechat_html(md_path: str) -> str:
     )
 
     # 列表：微信会丢弃 list-style，需要显式加上
+    # 注意：strong 在 li 内必须 inline 防断行
     raw = re.sub(
         r'<ul>',
         r'<ul style="margin: 0.8em 0; padding-left: 20px; list-style-type: disc;">',
@@ -170,6 +171,12 @@ def md_to_wechat_html(md_path: str) -> str:
     )
 
     # 粗体：保持微信原生加粗，不加额外颜色
+    # display: inline 防止在 li 内被断行成两个"点"
+    raw = re.sub(
+        r'<strong>',
+        r'<strong style="display: inline;">',
+        raw,
+    )
     # 图片：微信原生已处理 max-width，只加圆角
     raw = re.sub(
         r'<img([^>]*)>',
