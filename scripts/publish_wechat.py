@@ -14,6 +14,7 @@ WeChat Official Article Publisher
 import sys
 import json
 import time
+import os
 import argparse
 import requests
 import markdown
@@ -271,13 +272,19 @@ def parse_frontmatter(md_path: str) -> dict:
 
 def main():
     parser = argparse.ArgumentParser(description="发布 Markdown 文章到微信公众号")
-    parser.add_argument("--appid", required=True, help="公众号 AppID")
-    parser.add_argument("--appsecret", required=True, help="公众号 AppSecret")
+    parser.add_argument("--appid", default=None, help="公众号 AppID（默认读 WECHAT_APPID 环境变量）")
+    parser.add_argument("--appsecret", default=None, help="公众号 AppSecret（默认读 WECHAT_APPSECRET 环境变量）")
     parser.add_argument("--file", required=True, help="Markdown 文章路径")
     parser.add_argument("--cover", required=True, help="封面图片路径")
     parser.add_argument("--publish", action="store_true", 
                        help="直接发布（默认只创建草稿）")
     args = parser.parse_args()
+    
+    # 从环境变量读取凭据（CLI 参数优先）
+    appid = args.appid or os.environ.get("WECHAT_APPID")
+    appsecret = args.appsecret or os.environ.get("WECHAT_APPSECRET")
+    if not appid or not appsecret:
+        parser.error("请提供 --appid/--appsecret 或设置 WECHAT_APPID/WECHAT_APPSECRET 环境变量")
     
     # 解析 frontmatter
     meta = parse_frontmatter(args.file)
@@ -289,7 +296,7 @@ def main():
     print(f"✍️  作者: {author}")
     
     # 获取 Token
-    token = get_access_token(args.appid, args.appsecret)
+    token = get_access_token(appid, appsecret)
     
     # 上传封面
     thumb_id = upload_image(token, args.cover)
