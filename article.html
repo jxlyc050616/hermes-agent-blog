@@ -1,384 +1,681 @@
-<h1 style="font-size: 20px; font-weight: 700; color: #1a1a1a; margin: 24px 0 12px; padding: 0 0 8px; border-bottom: 2px solid #3866FF;">Hermes Agent v0.16 Kanban Swarm 深度解析：当 AI Agent 有了自己的协作流水线</h1>
-<h2 style="font-size: 18px; font-weight: 700; color: #1a1a1a; margin: 20px 0 10px; padding-left: 10px; border-left: 3px solid #3866FF;">引言</h2>
-<p style="margin: 1.5em 0;">2026年6月5日，Nous Research 发布了 Hermes Agent v0.16.0（代号"The Surface Release"）。这个版本的核心惊喜并不在标题中的桌面应用和仪表盘——那些只是改变了你与 Agent 交互的"表面"。真正值得 AI 开发者关注的，是一个在 v0.15.0 诞生、在 v0.16.0 进一步打磨的底层能力：<span style="font-weight: bold;">Kanban Swarm——多智能体协作工作流引擎</span>。</p>
-<p style="margin: 1.5em 0;">如果你还在手动编排多个 AI Agent，或者在 <code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">delegate_task</code> 的树形调用链里头疼，那么 Kanban Swarm 可能会彻底改变你组织 AI 工作流的方式。</p>
+<h1 style="font-size: 20px; font-weight: 700; color: #1a1a1a; margin: 24px 0 12px; padding: 0 0 8px; border-bottom: 2px solid #3866FF;">LLM Agent 工具调用机制深度解析：从 Function Calling 到 MCP 协议的架构演进</h1>
 <blockquote style="margin: 14px 0; padding: 12px 16px; background: #f5f7fa; border-left: 4px solid #3866FF; color: #555; font-size: 14px; border-radius: 0 4px 4px 0;">
-<p style="margin: 1.5em 0;"><span style="font-weight: bold;">一句话概括</span>：Kanban Swarm 是一个基于 SQLite 的持久化任务看板，让多个 AI Agent（不同 Profile）像工厂流水线一样协作——任务状态持久化、断点续传、人工介入、审计追溯，所有 Agent 之间通过看板行通信，不再依赖脆弱的进程内调用链。</p>
+<p style="margin: 1.5em 0;">让大语言模型不再只是"纸上谈兵"——工具调用是 Agent 通往真实世界的桥梁。</p>
+</blockquote>
+<h2 style="font-size: 18px; font-weight: 700; color: #1a1a1a; margin: 20px 0 10px; padding-left: 10px; border-left: 3px solid #3866FF;">摘要</h2>
+<p style="margin: 1.5em 0;">2023 年 OpenAI 推出 Function Calling 功能，标志着大语言模型（LLM）从"对话生成"迈入"行动执行"的关键转折。此后一年半，Anthropic 的 Tool Use、Google 的 Function Declaration、以及最新的 Model Context Protocol（MCP）协议相继问世，工具调用的架构从<span style="font-weight: bold;">封闭的 API 调用</span>演进为<span style="font-weight: bold;">开放的标准协议</span>。本文将深入解析这些机制的核心原理、架构设计、代码实现与工程化最佳实践，并通过完整的对比分析，帮助读者构建对 LLM 工具调用体系的系统性认知。</p>
+<hr style="border: none; border-top: 1px solid #e0e0e0; margin: 20px 0;">
+<h2 style="font-size: 18px; font-weight: 700; color: #1a1a1a; margin: 20px 0 10px; padding-left: 10px; border-left: 3px solid #3866FF;">一、为什么需要工具调用？</h2>
+<p style="margin: 1.5em 0;">大语言模型本质上是一个<span style="font-weight: bold;">概率生成器</span>——基于海量训练数据学习到的模式来预测下一个 token。它有几大天然局限：</p>
+<ol style="margin: 0.8em 0; padding-left: 20px; list-style-type: decimal;">
+<li style="margin: 6px 0;"><span style="font-weight: bold;">知识截止</span>：模型的知识停留在训练数据截止日期，无法获取最新信息</li>
+<li style="margin: 6px 0;"><span style="font-weight: bold;">计算能力弱</span>：无法精确执行数学运算，更无法运行代码</li>
+<li style="margin: 6px 0;"><span style="font-weight: bold;">无状态访问</span>：无法访问数据库、文件系统、API 等外部资源</li>
+<li style="margin: 6px 0;"><span style="font-weight: bold;">无法执行操作</span>：不能发送邮件、创建工单、修改配置等</li>
+</ol>
+<p style="margin: 1.5em 0;"><span style="font-weight: bold;">工具调用（Tool Calling/Function Calling）</span> 正是为了解决这些局限而设计的架构模式：LLM 生成结构化的"工具调用请求"，由宿主环境（Agent 框架/应用）执行实际调用，再将结果反馈给 LLM 进行下一步推理。</p>
+<p style="margin: 1.5em 0;">用一句大白话概括：<span style="font-weight: bold;">LLM 负责 "思考"，工具负责 "执行"。</span></p>
+<hr style="border: none; border-top: 1px solid #e0e0e0; margin: 20px 0;">
+<h2 style="font-size: 18px; font-weight: 700; color: #1a1a1a; margin: 20px 0 10px; padding-left: 10px; border-left: 3px solid #3866FF;">二、架构演进全景</h2>
+<h3 style="font-size: 16px; font-weight: 700; color: rgb(0, 181, 173); margin: 1.2em 0 0.5em; padding: 5px 0;">2.1 第一代：Prompt 工程时代（2022-2023）</h3>
+<p style="margin: 1.5em 0;">最早的方案是在系统提示词中描述可用的工具，让模型自然语言输出调用指令：</p>
+<div class="codehilite"><pre style="background: #1e1e1e; color: #d4d4d4; padding: 14px; font-size: 13px; line-height: 1.45; white-space: pre; font-family: Menlo, Consolas, Courier, monospace; border-radius: 6px; overflow-x: auto; margin: 12px 0;"><span></span><code><span class="err">你是一个智能助手。当你需要查询天气时，请输出：</span>
+<span class="p">[</span><span class="n">call_tool</span><span class="p">:</span><span class="w"> </span><span class="n">get_weather</span><span class="p">(</span><span class="n">location</span><span class="o">=</span><span class="s2">&quot;北京&quot;</span><span class="p">)]</span>
+</code></pre></div>
+
+<p style="margin: 1.5em 0;"><span style="font-weight: bold;">痛点</span>：不可靠。模型输出格式不固定，解析困难，几乎没有错误处理能力。</p>
+<h3 style="font-size: 16px; font-weight: 700; color: rgb(0, 181, 173); margin: 1.2em 0 0.5em; padding: 5px 0;">2.2 第二代：OpenAI Function Calling（2023.06）</h3>
+<p style="margin: 1.5em 0;">2023 年 6 月，OpenAI 在 <code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">gpt-3.5-turbo-0613</code> 和 <code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">gpt-4-0613</code> 中正式推出 Function Calling，成为<span style="font-weight: bold;">第一个原生支持工具调用的商业 LLM API</span>。</p>
+<p style="margin: 1.5em 0;">核心原理：在 API 请求中通过 <code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">functions</code> 或 <code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">tools</code> 参数声明可调用的工具，模型返回结构化 JSON，而非自然语言。</p>
+<div class="codehilite"><pre style="background: #1e1e1e; color: #d4d4d4; padding: 14px; font-size: 13px; line-height: 1.45; white-space: pre; font-family: Menlo, Consolas, Courier, monospace; border-radius: 6px; overflow-x: auto; margin: 12px 0;"><span></span><code><span class="c1">// API 请求中的工具声明</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;model&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;gpt-4&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;tools&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;function&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;function&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;get_weather&quot;</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;description&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;获取指定城市的当前天气&quot;</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;parameters&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;object&quot;</span><span class="p">,</span>
+<span class="w">          </span><span class="nt">&quot;properties&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="nt">&quot;location&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">              </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;string&quot;</span><span class="p">,</span>
+<span class="w">              </span><span class="nt">&quot;description&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;城市名，如 北京、上海&quot;</span>
+<span class="w">            </span><span class="p">},</span>
+<span class="w">            </span><span class="nt">&quot;unit&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">              </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;string&quot;</span><span class="p">,</span>
+<span class="w">              </span><span class="nt">&quot;enum&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;celsius&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;fahrenheit&quot;</span><span class="p">]</span>
+<span class="w">            </span><span class="p">}</span>
+<span class="w">          </span><span class="p">},</span>
+<span class="w">          </span><span class="nt">&quot;required&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;location&quot;</span><span class="p">]</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;messages&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span><span class="nt">&quot;role&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;user&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;content&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;北京今天天气怎么样？&quot;</span><span class="p">}</span>
+<span class="w">  </span><span class="p">]</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p style="margin: 1.5em 0;">模型返回的响应中会包含 <code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">tool_calls</code> 字段：</p>
+<div class="codehilite"><pre style="background: #1e1e1e; color: #d4d4d4; padding: 14px; font-size: 13px; line-height: 1.45; white-space: pre; font-family: Menlo, Consolas, Courier, monospace; border-radius: 6px; overflow-x: auto; margin: 12px 0;"><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;choices&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[{</span>
+<span class="w">    </span><span class="nt">&quot;message&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;role&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;assistant&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;content&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;tool_calls&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[{</span>
+<span class="w">        </span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;call_xxx&quot;</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;function&quot;</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;function&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;get_weather&quot;</span><span class="p">,</span>
+<span class="w">          </span><span class="nt">&quot;arguments&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;{\&quot;location\&quot;:\&quot;北京\&quot;}&quot;</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">      </span><span class="p">}]</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}]</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p style="margin: 1.5em 0;"><span style="font-weight: bold;">关键设计决策</span>：OpenAI 在模型内部通过<span style="font-weight: bold;">注意力机制</span>将 JSON Schema 与对话上下文进行联合编码，使模型能够：
+- 理解参数的语义约束（枚举、格式、必填）
+- 在需要时选择调用（而非强制每次都调用）
+- 支持并行调用（Parallel Function Calling，2023.11 发布）</p>
+<p style="margin: 1.5em 0;">这就是经典的 <span style="font-weight: bold;">ReAct（Reasoning + Acting）循环</span>：Think → Call → Observe → Repeat。</p>
+<div class="codehilite"><pre style="background: #1e1e1e; color: #d4d4d4; padding: 14px; font-size: 13px; line-height: 1.45; white-space: pre; font-family: Menlo, Consolas, Courier, monospace; border-radius: 6px; overflow-x: auto; margin: 12px 0;"><span></span><code><span class="c1"># 简化的 Function Calling 循环</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">agent_loop</span><span class="p">(</span><span class="n">user_query</span><span class="p">:</span> <span class="nb">str</span><span class="p">):</span>
+    <span class="n">messages</span> <span class="o">=</span> <span class="p">[{</span><span class="s2">&quot;role&quot;</span><span class="p">:</span> <span class="s2">&quot;user&quot;</span><span class="p">,</span> <span class="s2">&quot;content&quot;</span><span class="p">:</span> <span class="n">user_query</span><span class="p">}]</span>
+
+    <span class="k">while</span> <span class="kc">True</span><span class="p">:</span>
+        <span class="n">response</span> <span class="o">=</span> <span class="n">client</span><span class="o">.</span><span class="n">chat</span><span class="o">.</span><span class="n">completions</span><span class="o">.</span><span class="n">create</span><span class="p">(</span>
+            <span class="n">model</span><span class="o">=</span><span class="s2">&quot;gpt-4&quot;</span><span class="p">,</span>
+            <span class="n">messages</span><span class="o">=</span><span class="n">messages</span><span class="p">,</span>
+            <span class="n">tools</span><span class="o">=</span><span class="n">TOOLS</span><span class="p">,</span>
+            <span class="n">tool_choice</span><span class="o">=</span><span class="s2">&quot;auto&quot;</span>
+        <span class="p">)</span>
+
+        <span class="n">message</span> <span class="o">=</span> <span class="n">response</span><span class="o">.</span><span class="n">choices</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">message</span>
+        <span class="n">messages</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">message</span><span class="p">)</span>
+
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">message</span><span class="o">.</span><span class="n">tool_calls</span><span class="p">:</span>
+            <span class="c1"># 模型已给出最终回答</span>
+            <span class="k">return</span> <span class="n">message</span><span class="o">.</span><span class="n">content</span>
+
+        <span class="c1"># 执行每个工具调用</span>
+        <span class="k">for</span> <span class="n">tool_call</span> <span class="ow">in</span> <span class="n">message</span><span class="o">.</span><span class="n">tool_calls</span><span class="p">:</span>
+            <span class="n">result</span> <span class="o">=</span> <span class="n">execute_tool</span><span class="p">(</span><span class="n">tool_call</span><span class="o">.</span><span class="n">function</span><span class="o">.</span><span class="n">name</span><span class="p">,</span> 
+                                  <span class="n">json</span><span class="o">.</span><span class="n">loads</span><span class="p">(</span><span class="n">tool_call</span><span class="o">.</span><span class="n">function</span><span class="o">.</span><span class="n">arguments</span><span class="p">))</span>
+            <span class="n">messages</span><span class="o">.</span><span class="n">append</span><span class="p">({</span>
+                <span class="s2">&quot;role&quot;</span><span class="p">:</span> <span class="s2">&quot;tool&quot;</span><span class="p">,</span>
+                <span class="s2">&quot;tool_call_id&quot;</span><span class="p">:</span> <span class="n">tool_call</span><span class="o">.</span><span class="n">id</span><span class="p">,</span>
+                <span class="s2">&quot;content&quot;</span><span class="p">:</span> <span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">(</span><span class="n">result</span><span class="p">)</span>
+            <span class="p">})</span>
+</code></pre></div>
+
+<h3 style="font-size: 16px; font-weight: 700; color: rgb(0, 181, 173); margin: 1.2em 0 0.5em; padding: 5px 0;">2.3 第三代：多模型时代的百花齐放</h3>
+<p style="margin: 1.5em 0;">2024 年，各大模型厂商纷纷跟进：</p>
+<table style="border-collapse: collapse; width: 100%; font-size: 14px; margin: 12px 0;">
+<thead>
+<tr>
+<th style="background: #3866FF; color: #fff; padding: 8px 10px; border: 1px solid #ddd; text-align: left; font-weight: 600;">厂商</th>
+<th style="background: #3866FF; color: #fff; padding: 8px 10px; border: 1px solid #ddd; text-align: left; font-weight: 600;">功能名</th>
+<th style="background: #3866FF; color: #fff; padding: 8px 10px; border: 1px solid #ddd; text-align: left; font-weight: 600;">推出时间</th>
+<th style="background: #3866FF; color: #fff; padding: 8px 10px; border: 1px solid #ddd; text-align: left; font-weight: 600;">特色</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">OpenAI</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">Function Calling / Tool Calling</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">2023.06</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">首创，支持并行调用</td>
+</tr>
+<tr>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">Anthropic</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">Tool Use</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">2024.03</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">支持多轮工具调用链</td>
+</tr>
+<tr>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">Google Gemini</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">Function Declaration</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">2024.04</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">原生支持 Python 代码执行</td>
+</tr>
+<tr>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">Mistral</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">Function Calling</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">2024.05</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">开源模型，可自部署</td>
+</tr>
+<tr>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">Meta Llama 3</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">Tool Calling</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">2024.07</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">社区生态丰富</td>
+</tr>
+</tbody>
+</table>
+<p style="margin: 1.5em 0;">以 Anthropic 的 Tool Use 为例，其在架构上的独特设计是<span style="font-weight: bold;">工具结果自动注入</span>——模型内部自动将工具结果拼接回推理上下文，开发者无需手动管理 <code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">role: tool</code> 消息：</p>
+<div class="codehilite"><pre style="background: #1e1e1e; color: #d4d4d4; padding: 14px; font-size: 13px; line-height: 1.45; white-space: pre; font-family: Menlo, Consolas, Courier, monospace; border-radius: 6px; overflow-x: auto; margin: 12px 0;"><span></span><code><span class="c1"># Anthropic Tool Use 示例</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">anthropic</span>
+
+<span class="n">client</span> <span class="o">=</span> <span class="n">anthropic</span><span class="o">.</span><span class="n">Anthropic</span><span class="p">()</span>
+
+<span class="n">response</span> <span class="o">=</span> <span class="n">client</span><span class="o">.</span><span class="n">messages</span><span class="o">.</span><span class="n">create</span><span class="p">(</span>
+    <span class="n">model</span><span class="o">=</span><span class="s2">&quot;claude-3-5-sonnet-20241022&quot;</span><span class="p">,</span>
+    <span class="n">max_tokens</span><span class="o">=</span><span class="mi">1024</span><span class="p">,</span>
+    <span class="n">tools</span><span class="o">=</span><span class="p">[</span>
+        <span class="p">{</span>
+            <span class="s2">&quot;name&quot;</span><span class="p">:</span> <span class="s2">&quot;search_database&quot;</span><span class="p">,</span>
+            <span class="s2">&quot;description&quot;</span><span class="p">:</span> <span class="s2">&quot;搜索数据库中的用户信息&quot;</span><span class="p">,</span>
+            <span class="s2">&quot;input_schema&quot;</span><span class="p">:</span> <span class="p">{</span>
+                <span class="s2">&quot;type&quot;</span><span class="p">:</span> <span class="s2">&quot;object&quot;</span><span class="p">,</span>
+                <span class="s2">&quot;properties&quot;</span><span class="p">:</span> <span class="p">{</span>
+                    <span class="s2">&quot;query&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;type&quot;</span><span class="p">:</span> <span class="s2">&quot;string&quot;</span><span class="p">},</span>
+                    <span class="s2">&quot;limit&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;type&quot;</span><span class="p">:</span> <span class="s2">&quot;integer&quot;</span><span class="p">,</span> <span class="s2">&quot;default&quot;</span><span class="p">:</span> <span class="mi">10</span><span class="p">}</span>
+                <span class="p">},</span>
+                <span class="s2">&quot;required&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;query&quot;</span><span class="p">]</span>
+            <span class="p">}</span>
+        <span class="p">}</span>
+    <span class="p">],</span>
+    <span class="n">messages</span><span class="o">=</span><span class="p">[{</span><span class="s2">&quot;role&quot;</span><span class="p">:</span> <span class="s2">&quot;user&quot;</span><span class="p">,</span> <span class="s2">&quot;content&quot;</span><span class="p">:</span> <span class="s2">&quot;查找最近注册的用户&quot;</span><span class="p">}]</span>
+<span class="p">)</span>
+
+<span class="c1"># Claude 会返回 tool_use 类型的 content block</span>
+<span class="k">for</span> <span class="n">content</span> <span class="ow">in</span> <span class="n">response</span><span class="o">.</span><span class="n">content</span><span class="p">:</span>
+    <span class="k">if</span> <span class="n">content</span><span class="o">.</span><span class="n">type</span> <span class="o">==</span> <span class="s2">&quot;tool_use&quot;</span><span class="p">:</span>
+        <span class="n">result</span> <span class="o">=</span> <span class="n">execute_tool</span><span class="p">(</span><span class="n">content</span><span class="o">.</span><span class="n">name</span><span class="p">,</span> <span class="n">content</span><span class="o">.</span><span class="n">input</span><span class="p">)</span>
+        <span class="c1"># 将结果附加回对话</span>
+        <span class="n">messages</span><span class="o">.</span><span class="n">append</span><span class="p">({</span>
+            <span class="s2">&quot;role&quot;</span><span class="p">:</span> <span class="s2">&quot;user&quot;</span><span class="p">,</span> 
+            <span class="s2">&quot;content&quot;</span><span class="p">:</span> <span class="p">[</span>
+                <span class="p">{</span>
+                    <span class="s2">&quot;type&quot;</span><span class="p">:</span> <span class="s2">&quot;tool_result&quot;</span><span class="p">,</span>
+                    <span class="s2">&quot;tool_use_id&quot;</span><span class="p">:</span> <span class="n">content</span><span class="o">.</span><span class="n">id</span><span class="p">,</span>
+                    <span class="s2">&quot;content&quot;</span><span class="p">:</span> <span class="nb">str</span><span class="p">(</span><span class="n">result</span><span class="p">)</span>
+                <span class="p">}</span>
+            <span class="p">]</span>
+        <span class="p">})</span>
+</code></pre></div>
+
+<blockquote style="margin: 14px 0; padding: 12px 16px; background: #f5f7fa; border-left: 4px solid #3866FF; color: #555; font-size: 14px; border-radius: 0 4px 4px 0;">
+<p style="margin: 1.5em 0;"><span style="font-weight: bold;">架构洞察</span>：Function Calling 的技术本质是<span style="font-weight: bold;">约束解码</span>——模型在生成过程中，一旦检测到需要调用工具，其 token 生成空间会被限制为合法的 JSON 语法。这是一项需要专门训练的能力，并非简单的 prompt 工程。</p>
 </blockquote>
 <hr style="border: none; border-top: 1px solid #e0e0e0; margin: 20px 0;">
-<h2 style="font-size: 18px; font-weight: 700; color: #1a1a1a; margin: 20px 0 10px; padding-left: 10px; border-left: 3px solid #3866FF;">一、架构全景：从 <code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">delegate_task</code> 到 Kanban</h2>
-<p style="margin: 1.5em 0;">在理解 Kanban Swarm 之前，先要理解它解决的是什么问题。</p>
-<h3 style="font-size: 16px; font-weight: 700; color: rgb(0, 181, 173); margin: 1.2em 0 0.5em; padding: 5px 0;">1.1 <code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">delegate_task</code> 的局限</h3>
-<p style="margin: 1.5em 0;">Hermes 的 <code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">delegate_task</code> 是一个强大的 RPC 式子代理机制：主 Agent fork 出一个子 Agent 执行任务，等它完成后拿到结果，继续往下走。但它的设计本质决定了几个难以逾越的局限：</p>
+<h2 style="font-size: 18px; font-weight: 700; color: #1a1a1a; margin: 20px 0 10px; padding-left: 10px; border-left: 3px solid #3866FF;">三、MCP 协议：标准化工具调用</h2>
+<h3 style="font-size: 16px; font-weight: 700; color: rgb(0, 181, 173); margin: 1.2em 0 0.5em; padding: 5px 0;">3.1 背景：碎片化之痛</h3>
+<p style="margin: 1.5em 0;">随着工具调用的普及，行业面临一个尴尬局面：每接入一个工具，开发者就需要：
+1. 编写 JSON Schema 声明
+2. 实现 API 调用逻辑
+3. 处理认证、重试、错误
+4. 适配不同 LLM 厂商的格式差异</p>
+<p style="margin: 1.5em 0;"><span style="font-weight: bold;">这种"点对点集成"在工具数量增长时迅速失控。</span></p>
+<h3 style="font-size: 16px; font-weight: 700; color: rgb(0, 181, 173); margin: 1.2em 0 0.5em; padding: 5px 0;">3.2 MCP 是什么？</h3>
+<p style="margin: 1.5em 0;">2024 年 11 月，Anthropic 发布了 <span style="font-weight: bold;">Model Context Protocol（MCP）</span>，旨在成为 LLM 工具调用的"HTTP 协议"——一个开放、统一的标准化协议。</p>
+<p style="margin: 1.5em 0;">MCP 的核心架构采用<span style="font-weight: bold;">客户端-服务器</span>模型：</p>
+<div class="codehilite"><pre style="background: #1e1e1e; color: #d4d4d4; padding: 14px; font-size: 13px; line-height: 1.45; white-space: pre; font-family: Menlo, Consolas, Courier, monospace; border-radius: 6px; overflow-x: auto; margin: 12px 0;"><span></span><code>┌─────────────────────────────────────────┐
+│             AI 应用 (MCP Client)         │
+│  ┌─────────────────────────────────┐    │
+│  │    Hermes / Claude Desktop      │    │
+│  │    / Cursor / 自定义 Agent      │    │
+│  └──────────┬──────────────────────┘    │
+│             │ MCP Protocol              │
+│  ┌──────────▼──────────────────────┐    │
+│  │    Transport Layer              │    │
+│  │  (stdio / SSE / WebSocket)      │    │
+│  └─────────────────────────────────┘    │
+└─────────────────────────────────────────┘
+              │
+    ┌─────────┴─────────┐
+    ▼                   ▼
+┌──────────┐     ┌──────────┐
+│ MCP Server │     │ MCP Server │
+│ (文件系统)  │     │ (数据库)   │
+│ 工具:      │     │ 工具:      │
+│  - read    │     │  - query   │
+│  - write   │     │  - insert  │
+│  - search  │     │  - update  │
+└──────────┘     └──────────┘
+</code></pre></div>
+
+<h3 style="font-size: 16px; font-weight: 700; color: rgb(0, 181, 173); margin: 1.2em 0 0.5em; padding: 5px 0;">3.3 MCP 的核心概念</h3>
+<p style="margin: 1.5em 0;"><span style="font-weight: bold;">Resources（资源）</span>：暴露给 LLM 的数据来源，类似 RESTful API 的资源概念。通过 URI 定位，支持动态更新的订阅机制。</p>
+<p style="margin: 1.5em 0;"><span style="font-weight: bold;">Tools（工具）</span>：LLM 可以调用的可执行动作。每个工具有名称、描述和 JSON Schema 参数定义。</p>
+<p style="margin: 1.5em 0;"><span style="font-weight: bold;">Prompts（提示模板）</span>：预定义的对话模板，LLM 可以"使用"特定工具时自动注入上下文。</p>
+<p style="margin: 1.5em 0;"><span style="font-weight: bold;">Transport（传输层）</span>：MCP 支持多种传输方式：
+- <span style="font-weight: bold;">stdio</span>：通过子进程的标准输入/输出通信，适合本地工具
+- <span style="font-weight: bold;">SSE（Server-Sent Events）</span>：通过 HTTP 长连接通信，适合远程服务
+- <span style="font-weight: bold;">WebSocket</span>：双向通信，适合实时交互（预览特性）</p>
+<h3 style="font-size: 16px; font-weight: 700; color: rgb(0, 181, 173); margin: 1.2em 0 0.5em; padding: 5px 0;">3.4 MCP 协议的核心流程</h3>
+<div class="codehilite"><pre style="background: #1e1e1e; color: #d4d4d4; padding: 14px; font-size: 13px; line-height: 1.45; white-space: pre; font-family: Menlo, Consolas, Courier, monospace; border-radius: 6px; overflow-x: auto; margin: 12px 0;"><span></span><code><span class="c1">// Client → Server: 初始化</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;jsonrpc&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2.0&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;method&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;initialize&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;params&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;protocolVersion&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2025-03-26&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;capabilities&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;tools&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="nt">&quot;clientInfo&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;hermes-agent&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;version&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;1.0.0&quot;</span><span class="w"> </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="c1">// Server → Client: 返回可用工具列表</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;jsonrpc&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2.0&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;method&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;tools/list&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;params&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{}</span>
+<span class="p">}</span>
+
+<span class="c1">// 响应</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;jsonrpc&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2.0&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;result&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;tools&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">      </span><span class="p">{</span>
+<span class="w">        </span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;read_file&quot;</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;description&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;读取文件内容&quot;</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;inputSchema&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;object&quot;</span><span class="p">,</span>
+<span class="w">          </span><span class="nt">&quot;properties&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="nt">&quot;path&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;string&quot;</span><span class="w"> </span><span class="p">}</span>
+<span class="w">          </span><span class="p">},</span>
+<span class="w">          </span><span class="nt">&quot;required&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;path&quot;</span><span class="p">]</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">]</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="c1">// Client → Server: 调用工具</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;jsonrpc&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2.0&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">3</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;method&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;tools/call&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;params&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;read_file&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;arguments&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;path&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;/tmp/test.txt&quot;</span><span class="w"> </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h3 style="font-size: 16px; font-weight: 700; color: rgb(0, 181, 173); margin: 1.2em 0 0.5em; padding: 5px 0;">3.5 实现一个简单的 MCP Server</h3>
+<div class="codehilite"><pre style="background: #1e1e1e; color: #d4d4d4; padding: 14px; font-size: 13px; line-height: 1.45; white-space: pre; font-family: Menlo, Consolas, Courier, monospace; border-radius: 6px; overflow-x: auto; margin: 12px 0;"><span></span><code><span class="c1"># mcp_server.py — 一个最小化的 MCP Server</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">json</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">sys</span>
+
+<span class="k">class</span><span class="w"> </span><span class="nc">MCPServer</span><span class="p">:</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">tools</span> <span class="o">=</span> <span class="p">{</span>
+            <span class="s2">&quot;calculator&quot;</span><span class="p">:</span> <span class="p">{</span>
+                <span class="s2">&quot;name&quot;</span><span class="p">:</span> <span class="s2">&quot;calculator&quot;</span><span class="p">,</span>
+                <span class="s2">&quot;description&quot;</span><span class="p">:</span> <span class="s2">&quot;执行数学运算&quot;</span><span class="p">,</span>
+                <span class="s2">&quot;inputSchema&quot;</span><span class="p">:</span> <span class="p">{</span>
+                    <span class="s2">&quot;type&quot;</span><span class="p">:</span> <span class="s2">&quot;object&quot;</span><span class="p">,</span>
+                    <span class="s2">&quot;properties&quot;</span><span class="p">:</span> <span class="p">{</span>
+                        <span class="s2">&quot;expr&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;type&quot;</span><span class="p">:</span> <span class="s2">&quot;string&quot;</span><span class="p">,</span> <span class="s2">&quot;description&quot;</span><span class="p">:</span> <span class="s2">&quot;数学表达式&quot;</span><span class="p">}</span>
+                    <span class="p">},</span>
+                    <span class="s2">&quot;required&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;expr&quot;</span><span class="p">]</span>
+                <span class="p">}</span>
+            <span class="p">}</span>
+        <span class="p">}</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">handle_message</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">message</span><span class="p">:</span> <span class="nb">dict</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">:</span>
+        <span class="n">method</span> <span class="o">=</span> <span class="n">message</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;method&quot;</span><span class="p">)</span>
+
+        <span class="k">if</span> <span class="n">method</span> <span class="o">==</span> <span class="s2">&quot;initialize&quot;</span><span class="p">:</span>
+            <span class="k">return</span> <span class="p">{</span>
+                <span class="s2">&quot;jsonrpc&quot;</span><span class="p">:</span> <span class="s2">&quot;2.0&quot;</span><span class="p">,</span>
+                <span class="s2">&quot;id&quot;</span><span class="p">:</span> <span class="n">message</span><span class="p">[</span><span class="s2">&quot;id&quot;</span><span class="p">],</span>
+                <span class="s2">&quot;result&quot;</span><span class="p">:</span> <span class="p">{</span>
+                    <span class="s2">&quot;protocolVersion&quot;</span><span class="p">:</span> <span class="s2">&quot;2025-03-26&quot;</span><span class="p">,</span>
+                    <span class="s2">&quot;serverInfo&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;name&quot;</span><span class="p">:</span> <span class="s2">&quot;calc-server&quot;</span><span class="p">,</span> <span class="s2">&quot;version&quot;</span><span class="p">:</span> <span class="s2">&quot;1.0.0&quot;</span><span class="p">},</span>
+                    <span class="s2">&quot;capabilities&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;tools&quot;</span><span class="p">:</span> <span class="p">{}}</span>
+                <span class="p">}</span>
+            <span class="p">}</span>
+
+        <span class="k">elif</span> <span class="n">method</span> <span class="o">==</span> <span class="s2">&quot;tools/list&quot;</span><span class="p">:</span>
+            <span class="k">return</span> <span class="p">{</span>
+                <span class="s2">&quot;jsonrpc&quot;</span><span class="p">:</span> <span class="s2">&quot;2.0&quot;</span><span class="p">,</span>
+                <span class="s2">&quot;id&quot;</span><span class="p">:</span> <span class="n">message</span><span class="p">[</span><span class="s2">&quot;id&quot;</span><span class="p">],</span>
+                <span class="s2">&quot;result&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;tools&quot;</span><span class="p">:</span> <span class="nb">list</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">tools</span><span class="o">.</span><span class="n">values</span><span class="p">())}</span>
+            <span class="p">}</span>
+
+        <span class="k">elif</span> <span class="n">method</span> <span class="o">==</span> <span class="s2">&quot;tools/call&quot;</span><span class="p">:</span>
+            <span class="n">name</span> <span class="o">=</span> <span class="n">message</span><span class="p">[</span><span class="s2">&quot;params&quot;</span><span class="p">][</span><span class="s2">&quot;name&quot;</span><span class="p">]</span>
+            <span class="n">args</span> <span class="o">=</span> <span class="n">message</span><span class="p">[</span><span class="s2">&quot;params&quot;</span><span class="p">][</span><span class="s2">&quot;arguments&quot;</span><span class="p">]</span>
+            <span class="n">result</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">execute_tool</span><span class="p">(</span><span class="n">name</span><span class="p">,</span> <span class="n">args</span><span class="p">)</span>
+            <span class="k">return</span> <span class="p">{</span>
+                <span class="s2">&quot;jsonrpc&quot;</span><span class="p">:</span> <span class="s2">&quot;2.0&quot;</span><span class="p">,</span>
+                <span class="s2">&quot;id&quot;</span><span class="p">:</span> <span class="n">message</span><span class="p">[</span><span class="s2">&quot;id&quot;</span><span class="p">],</span>
+                <span class="s2">&quot;result&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;content&quot;</span><span class="p">:</span> <span class="p">[{</span><span class="s2">&quot;type&quot;</span><span class="p">:</span> <span class="s2">&quot;text&quot;</span><span class="p">,</span> <span class="s2">&quot;text&quot;</span><span class="p">:</span> <span class="nb">str</span><span class="p">(</span><span class="n">result</span><span class="p">)}]}</span>
+            <span class="p">}</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">execute_tool</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">args</span><span class="p">:</span> <span class="nb">dict</span><span class="p">):</span>
+        <span class="k">if</span> <span class="n">name</span> <span class="o">==</span> <span class="s2">&quot;calculator&quot;</span><span class="p">:</span>
+            <span class="n">expr</span> <span class="o">=</span> <span class="n">args</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;expr&quot;</span><span class="p">,</span> <span class="s2">&quot;&quot;</span><span class="p">)</span>
+            <span class="k">try</span><span class="p">:</span>
+                <span class="k">return</span> <span class="nb">eval</span><span class="p">(</span><span class="n">expr</span><span class="p">,</span> <span class="p">{</span><span class="s2">&quot;__builtins__&quot;</span><span class="p">:</span> <span class="p">{}},</span> <span class="p">{</span><span class="s2">&quot;abs&quot;</span><span class="p">:</span> <span class="nb">abs</span><span class="p">,</span> <span class="s2">&quot;round&quot;</span><span class="p">:</span> <span class="nb">round</span><span class="p">})</span>
+            <span class="k">except</span> <span class="ne">Exception</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
+                <span class="k">return</span> <span class="sa">f</span><span class="s2">&quot;计算错误: </span><span class="si">{</span><span class="n">e</span><span class="si">}</span><span class="s2">&quot;</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">run</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;通过 stdio 运行 MCP Server&quot;&quot;&quot;</span>
+        <span class="k">for</span> <span class="n">line</span> <span class="ow">in</span> <span class="n">sys</span><span class="o">.</span><span class="n">stdin</span><span class="p">:</span>
+            <span class="k">try</span><span class="p">:</span>
+                <span class="n">message</span> <span class="o">=</span> <span class="n">json</span><span class="o">.</span><span class="n">loads</span><span class="p">(</span><span class="n">line</span><span class="o">.</span><span class="n">strip</span><span class="p">())</span>
+                <span class="n">response</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">handle_message</span><span class="p">(</span><span class="n">message</span><span class="p">)</span>
+                <span class="nb">print</span><span class="p">(</span><span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">(</span><span class="n">response</span><span class="p">),</span> <span class="n">flush</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+            <span class="k">except</span> <span class="ne">Exception</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
+                <span class="n">error</span> <span class="o">=</span> <span class="p">{</span>
+                    <span class="s2">&quot;jsonrpc&quot;</span><span class="p">:</span> <span class="s2">&quot;2.0&quot;</span><span class="p">,</span>
+                    <span class="s2">&quot;id&quot;</span><span class="p">:</span> <span class="kc">None</span><span class="p">,</span>
+                    <span class="s2">&quot;error&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;code&quot;</span><span class="p">:</span> <span class="o">-</span><span class="mi">32700</span><span class="p">,</span> <span class="s2">&quot;message&quot;</span><span class="p">:</span> <span class="nb">str</span><span class="p">(</span><span class="n">e</span><span class="p">)}</span>
+                <span class="p">}</span>
+                <span class="nb">print</span><span class="p">(</span><span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">(</span><span class="n">error</span><span class="p">),</span> <span class="n">flush</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+
+<span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s2">&quot;__main__&quot;</span><span class="p">:</span>
+    <span class="n">MCPServer</span><span class="p">()</span><span class="o">.</span><span class="n">run</span><span class="p">()</span>
+</code></pre></div>
+
+<h3 style="font-size: 16px; font-weight: 700; color: rgb(0, 181, 173); margin: 1.2em 0 0.5em; padding: 5px 0;">3.6 MCP 的生态与前景</h3>
+<p style="margin: 1.5em 0;">截至 2026 年 7 月，MCP 生态已相当丰富：</p>
+<ul style="margin: 0.8em 0; padding-left: 20px; list-style-type: disc;">
+<li style="margin: 6px 0;"><span style="font-weight: bold;">官方实现</span>：Anthropic 提供 Python、TypeScript、Java 和 Kotlin SDK</li>
+<li style="margin: 6px 0;"><span style="font-weight: bold;">客户端支持</span>：Claude Desktop、Cursor、VS Code（通过 Copilot）、JetBrains IDE、Hermes Agent</li>
+<li style="margin: 6px 0;"><span style="font-weight: bold;">预置服务器</span>：文件系统、数据库（PostgreSQL/MySQL/SQLite）、浏览器（Playwright/Puppeteer）、Git、Slack、Notion、飞书</li>
+<li style="margin: 6px 0;"><span style="font-weight: bold;">工具链</span>：MCP Inspector（调试工具）、MCP Proxy（网关）、MCP Registry（服务目录）</li>
+</ul>
+<p style="margin: 1.5em 0;">MCP 的出现标志着 LLM 工具调用从<span style="font-weight: bold;">私有 API 时代</span>迈入<span style="font-weight: bold;">开放协议时代</span>，这类似于 HTTP 对 Web 的意义——统一的标准催生了繁荣的生态。</p>
+<hr style="border: none; border-top: 1px solid #e0e0e0; margin: 20px 0;">
+<h2 style="font-size: 18px; font-weight: 700; color: #1a1a1a; margin: 20px 0 10px; padding-left: 10px; border-left: 3px solid #3866FF;">四、Agent 框架中的工具编排</h2>
+<h3 style="font-size: 16px; font-weight: 700; color: rgb(0, 181, 173); margin: 1.2em 0 0.5em; padding: 5px 0;">4.1 从单工具到多工具编排</h3>
+<p style="margin: 1.5em 0;">单一工具调用并不复杂，真正的挑战在于<span style="font-weight: bold;">多工具编排</span>——Agent 需要自主决定调用哪些工具、以什么顺序调用、如何处理中间结果。</p>
+<p style="margin: 1.5em 0;">Agent 框架中的编排模式主要有三种：</p>
+<table style="border-collapse: collapse; width: 100%; font-size: 14px; margin: 12px 0;">
+<thead>
+<tr>
+<th style="background: #3866FF; color: #fff; padding: 8px 10px; border: 1px solid #ddd; text-align: left; font-weight: 600;">模式</th>
+<th style="background: #3866FF; color: #fff; padding: 8px 10px; border: 1px solid #ddd; text-align: left; font-weight: 600;">描述</th>
+<th style="background: #3866FF; color: #fff; padding: 8px 10px; border: 1px solid #ddd; text-align: left; font-weight: 600;">适用场景</th>
+<th style="background: #3866FF; color: #fff; padding: 8px 10px; border: 1px solid #ddd; text-align: left; font-weight: 600;">代表框架</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="padding: 8px 10px; border: 1px solid #ddd;"><span style="font-weight: bold;">线性链</span></td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">按顺序依次调用工具</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">固定流程（如：搜索→总结→报告）</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">LangChain Chain</td>
+</tr>
+<tr>
+<td style="padding: 8px 10px; border: 1px solid #ddd;"><span style="font-weight: bold;">DAG 执行</span></td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">有向无环图，依赖并行</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">复杂多步骤任务</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">LlamaIndex</td>
+</tr>
+<tr>
+<td style="padding: 8px 10px; border: 1px solid #ddd;"><span style="font-weight: bold;">ReAct 循环</span></td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">动态推理→行动→观察循环</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">开放探索型任务</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">AutoGPT, Hermes Agent</td>
+</tr>
+<tr>
+<td style="padding: 8px 10px; border: 1px solid #ddd;"><span style="font-weight: bold;">Plan-and-Solve</span></td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">先规划再逐步执行</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">需全局规划的长任务</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">HuggingGPT, BabyAGI</td>
+</tr>
+</tbody>
+</table>
+<h3 style="font-size: 16px; font-weight: 700; color: rgb(0, 181, 173); margin: 1.2em 0 0.5em; padding: 5px 0;">4.2 工具调用的核心挑战</h3>
+<p style="margin: 1.5em 0;"><span style="font-weight: bold;">1. 幻觉控制</span></p>
+<p style="margin: 1.5em 0;">工具调用结果中，最危险的错误并非"调用失败"，而是<span style="font-weight: bold;">"模型幻觉出工具调用"</span>——模型编造了一个不存在的调用并"假装"成功。解决方案：</p>
+<ul style="margin: 0.8em 0; padding-left: 20px; list-style-type: disc;">
+<li style="margin: 6px 0;">严格校验工具名称和参数 Schema</li>
+<li style="margin: 6px 0;">在训练阶段加入负样本（不应调用工具的场景）</li>
+<li style="margin: 6px 0;">使用 <code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">tool_choice: "required"</code> 强制关键流程必须调用</li>
+</ul>
+<p style="margin: 1.5em 0;"><span style="font-weight: bold;">2. 上下文窗口管理</span></p>
+<p style="margin: 1.5em 0;">工具返回值可能非常庞大。以文件读取为例，一次 <code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">read_file</code> 可能返回 10 万行日志。高效管理：</p>
+<div class="codehilite"><pre style="background: #1e1e1e; color: #d4d4d4; padding: 14px; font-size: 13px; line-height: 1.45; white-space: pre; font-family: Menlo, Consolas, Courier, monospace; border-radius: 6px; overflow-x: auto; margin: 12px 0;"><span></span><code><span class="c1"># 工具结果截断策略</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">truncate_tool_result</span><span class="p">(</span><span class="n">result</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">max_tokens</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">2000</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+    <span class="n">tokens</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">result</span><span class="p">)</span> <span class="o">//</span> <span class="mi">2</span>  <span class="c1"># 粗略估算</span>
+    <span class="k">if</span> <span class="n">tokens</span> <span class="o">&lt;=</span> <span class="n">max_tokens</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">result</span>
+
+    <span class="c1"># 截取头部 + 尾部 + 中间省略</span>
+    <span class="n">head_len</span> <span class="o">=</span> <span class="n">max_tokens</span> <span class="o">//</span> <span class="mi">2</span>
+    <span class="n">tail_len</span> <span class="o">=</span> <span class="n">max_tokens</span> <span class="o">//</span> <span class="mi">4</span>
+    <span class="k">return</span> <span class="p">(</span>
+        <span class="n">result</span><span class="p">[:</span><span class="n">head_len</span> <span class="o">*</span> <span class="mi">2</span><span class="p">]</span> <span class="o">+</span>
+        <span class="sa">f</span><span class="s2">&quot;</span><span class="se">\n\n</span><span class="s2">... [中间省略 </span><span class="si">{</span><span class="n">tokens</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">head_len</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">tail_len</span><span class="si">}</span><span class="s2"> tokens] ...</span><span class="se">\n\n</span><span class="s2">&quot;</span> <span class="o">+</span>
+        <span class="n">result</span><span class="p">[</span><span class="o">-</span><span class="n">tail_len</span> <span class="o">*</span> <span class="mi">2</span><span class="p">:]</span>
+    <span class="p">)</span>
+</code></pre></div>
+
+<p style="margin: 1.5em 0;"><span style="font-weight: bold;">3. 错误重试与回退</span></p>
+<p style="margin: 1.5em 0;">工具调用的失败模式多样：超时、认证过期、限流、数据格式变更。成熟的 Agent 框架应有以下策略：</p>
+<div class="codehilite"><pre style="background: #1e1e1e; color: #d4d4d4; padding: 14px; font-size: 13px; line-height: 1.45; white-space: pre; font-family: Menlo, Consolas, Courier, monospace; border-radius: 6px; overflow-x: auto; margin: 12px 0;"><span></span><code><span class="k">class</span><span class="w"> </span><span class="nc">ToolRetryStrategy</span><span class="p">:</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">max_retries</span><span class="o">=</span><span class="mi">3</span><span class="p">,</span> <span class="n">backoff</span><span class="o">=</span><span class="mf">1.0</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">max_retries</span> <span class="o">=</span> <span class="n">max_retries</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">backoff</span> <span class="o">=</span> <span class="n">backoff</span>
+
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">execute_with_retry</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">tool_call_func</span><span class="p">,</span> <span class="n">fallback</span><span class="o">=</span><span class="kc">None</span><span class="p">):</span>
+        <span class="n">last_error</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="k">for</span> <span class="n">attempt</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">max_retries</span><span class="p">):</span>
+            <span class="k">try</span><span class="p">:</span>
+                <span class="k">return</span> <span class="k">await</span> <span class="n">tool_call_func</span><span class="p">()</span>
+            <span class="k">except</span> <span class="n">RateLimitError</span><span class="p">:</span>
+                <span class="n">wait</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">backoff</span> <span class="o">*</span> <span class="p">(</span><span class="mi">2</span> <span class="o">**</span> <span class="n">attempt</span><span class="p">)</span>
+                <span class="k">await</span> <span class="n">asyncio</span><span class="o">.</span><span class="n">sleep</span><span class="p">(</span><span class="n">wait</span><span class="p">)</span>
+            <span class="k">except</span> <span class="n">AuthError</span><span class="p">:</span>
+                <span class="k">await</span> <span class="bp">self</span><span class="o">.</span><span class="n">refresh_auth</span><span class="p">()</span>
+            <span class="k">except</span> <span class="n">ToolNotFoundError</span><span class="p">:</span>
+                <span class="k">if</span> <span class="n">fallback</span><span class="p">:</span>
+                    <span class="k">return</span> <span class="k">await</span> <span class="n">fallback</span><span class="p">()</span>
+                <span class="k">raise</span>
+        <span class="k">raise</span> <span class="n">last_error</span> <span class="ow">or</span> <span class="ne">RuntimeError</span><span class="p">(</span><span class="s2">&quot;所有重试均失败&quot;</span><span class="p">)</span>
+</code></pre></div>
+
+<h3 style="font-size: 16px; font-weight: 700; color: rgb(0, 181, 173); margin: 1.2em 0 0.5em; padding: 5px 0;">4.3 Hermes Agent 的工具调用设计</h3>
+<p style="margin: 1.5em 0;">作为 Nous Research 出品的 Agent 框架，Hermes Agent 在工具调用方面做出了独特的设计选择：</p>
+<p style="margin: 1.5em 0;"><span style="font-weight: bold;">1. 统一的 Tool Executor 抽象</span></p>
+<p style="margin: 1.5em 0;">所有工具通过统一的 <code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">ToolExecutor</code> 接口注册和执行，支持 MCP 协议的标准工具和自定义 Python 函数：</p>
+<div class="codehilite"><pre style="background: #1e1e1e; color: #d4d4d4; padding: 14px; font-size: 13px; line-height: 1.45; white-space: pre; font-family: Menlo, Consolas, Courier, monospace; border-radius: 6px; overflow-x: auto; margin: 12px 0;"><span></span><code><span class="k">class</span><span class="w"> </span><span class="nc">ToolExecutor</span><span class="p">:</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_tools</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Tool</span><span class="p">]</span> <span class="o">=</span> <span class="p">{}</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_mcp_clients</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">MCPClient</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">register_tool</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">tool</span><span class="p">:</span> <span class="n">Tool</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_tools</span><span class="p">[</span><span class="n">tool</span><span class="o">.</span><span class="n">name</span><span class="p">]</span> <span class="o">=</span> <span class="n">tool</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">register_mcp_server</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">server_config</span><span class="p">:</span> <span class="nb">dict</span><span class="p">):</span>
+        <span class="n">client</span> <span class="o">=</span> <span class="n">MCPClient</span><span class="p">(</span><span class="n">server_config</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_mcp_clients</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">client</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">list_tools</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="nb">dict</span><span class="p">]:</span>
+        <span class="n">tools</span> <span class="o">=</span> <span class="p">[]</span>
+        <span class="k">for</span> <span class="n">t</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_tools</span><span class="o">.</span><span class="n">values</span><span class="p">():</span>
+            <span class="n">tools</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">t</span><span class="o">.</span><span class="n">to_schema</span><span class="p">())</span>
+        <span class="k">for</span> <span class="n">client</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_mcp_clients</span><span class="p">:</span>
+            <span class="n">tools</span><span class="o">.</span><span class="n">extend</span><span class="p">(</span><span class="n">client</span><span class="o">.</span><span class="n">get_tools</span><span class="p">())</span>
+        <span class="k">return</span> <span class="n">tools</span>
+
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">execute</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">args</span><span class="p">:</span> <span class="nb">dict</span><span class="p">):</span>
+        <span class="k">if</span> <span class="n">name</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_tools</span><span class="p">:</span>
+            <span class="k">return</span> <span class="k">await</span> <span class="bp">self</span><span class="o">.</span><span class="n">_tools</span><span class="p">[</span><span class="n">name</span><span class="p">]</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span><span class="o">**</span><span class="n">args</span><span class="p">)</span>
+        <span class="k">for</span> <span class="n">client</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_mcp_clients</span><span class="p">:</span>
+            <span class="k">if</span> <span class="n">name</span> <span class="ow">in</span> <span class="n">client</span><span class="o">.</span><span class="n">tool_names</span><span class="p">:</span>
+                <span class="k">return</span> <span class="k">await</span> <span class="n">client</span><span class="o">.</span><span class="n">call_tool</span><span class="p">(</span><span class="n">name</span><span class="p">,</span> <span class="n">args</span><span class="p">)</span>
+        <span class="k">raise</span> <span class="n">ToolNotFoundError</span><span class="p">(</span><span class="n">name</span><span class="p">)</span>
+</code></pre></div>
+
+<p style="margin: 1.5em 0;"><span style="font-weight: bold;">2. 并行工具调用优化</span></p>
+<p style="margin: 1.5em 0;">支持同时调用多个不相关的工具，极大提升效率：</p>
+<div class="codehilite"><pre style="background: #1e1e1e; color: #d4d4d4; padding: 14px; font-size: 13px; line-height: 1.45; white-space: pre; font-family: Menlo, Consolas, Courier, monospace; border-radius: 6px; overflow-x: auto; margin: 12px 0;"><span></span><code>用户：&quot;对比一下北京和上海今天的天气，顺便查一下明天的股票走势&quot;
+                          │
+                    ┌─────┴─────┐
+                    │  LLM 推理  │
+                    └─────┬─────┘
+                          │
+              ┌───────────┼───────────┐
+              ▼           ▼           ▼
+        get_weather  get_weather  get_stock
+        (北京)       (上海)       (市场指数)
+              │           │           │
+              └───────────┼───────────┘
+                          ▼
+                    综合结果回复
+</code></pre></div>
+
+<hr style="border: none; border-top: 1px solid #e0e0e0; margin: 20px 0;">
+<h2 style="font-size: 18px; font-weight: 700; color: #1a1a1a; margin: 20px 0 10px; padding-left: 10px; border-left: 3px solid #3866FF;">五、性能对比与选型指南</h2>
+<h3 style="font-size: 16px; font-weight: 700; color: rgb(0, 181, 173); margin: 1.2em 0 0.5em; padding: 5px 0;">5.1 不同工具调用方案的对比</h3>
 <table style="border-collapse: collapse; width: 100%; font-size: 14px; margin: 12px 0;">
 <thead>
 <tr>
 <th style="background: #3866FF; color: #fff; padding: 8px 10px; border: 1px solid #ddd; text-align: left; font-weight: 600;">维度</th>
-<th style="background: #3866FF; color: #fff; padding: 8px 10px; border: 1px solid #ddd; text-align: left; font-weight: 600;"><code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">delegate_task</code></th>
-<th style="background: #3866FF; color: #fff; padding: 8px 10px; border: 1px solid #ddd; text-align: left; font-weight: 600;">Kanban Swarm</th>
+<th style="background: #3866FF; color: #fff; padding: 8px 10px; border: 1px solid #ddd; text-align: left; font-weight: 600;">Native Function Calling</th>
+<th style="background: #3866FF; color: #fff; padding: 8px 10px; border: 1px solid #ddd; text-align: left; font-weight: 600;">MCP 协议</th>
+<th style="background: #3866FF; color: #fff; padding: 8px 10px; border: 1px solid #ddd; text-align: left; font-weight: 600;">ReAct Prompt</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td style="padding: 8px 10px; border: 1px solid #ddd;"><span style="font-weight: bold;">形态</span></td>
-<td style="padding: 8px 10px; border: 1px solid #ddd;">RPC 调用（fork → join）</td>
-<td style="padding: 8px 10px; border: 1px solid #ddd;">持久化消息队列 + 状态机</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;"><span style="font-weight: bold;">协议开放性</span></td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">私有 API</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">开放标准</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">无协议</td>
 </tr>
 <tr>
-<td style="padding: 8px 10px; border: 1px solid #ddd;"><span style="font-weight: bold;">父进程</span></td>
-<td style="padding: 8px 10px; border: 1px solid #ddd;">阻塞等待子进程返回</td>
-<td style="padding: 8px 10px; border: 1px solid #ddd;">fire-and-forget，创建后立即返回</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;"><span style="font-weight: bold;">跨模型兼容</span></td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">仅同厂商</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">所有 MCP 客户端</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">理论上通用</td>
 </tr>
 <tr>
-<td style="padding: 8px 10px; border: 1px solid #ddd;"><span style="font-weight: bold;">子进程标识</span></td>
-<td style="padding: 8px 10px; border: 1px solid #ddd;">匿名子 Agent</td>
-<td style="padding: 8px 10px; border: 1px solid #ddd;">具名 Profile，带持久化记忆</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;"><span style="font-weight: bold;">部署复杂度</span></td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">低（API 内置）</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">中（需搭建 Server）</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">极低</td>
 </tr>
 <tr>
-<td style="padding: 8px 10px; border: 1px solid #ddd;"><span style="font-weight: bold;">断点续传</span></td>
-<td style="padding: 8px 10px; border: 1px solid #ddd;">不支持——失败即失败</td>
-<td style="padding: 8px 10px; border: 1px solid #ddd;">阻塞 → 解阻塞 → 重试；崩溃 → 回收</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;"><span style="font-weight: bold;">工具复用</span></td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">需重复声明</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">一次声明到处用</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">需重复声明</td>
 </tr>
 <tr>
-<td style="padding: 8px 10px; border: 1px solid #ddd;"><span style="font-weight: bold;">人工介入</span></td>
-<td style="padding: 8px 10px; border: 1px solid #ddd;">不支持</td>
-<td style="padding: 8px 10px; border: 1px solid #ddd;">随时评论和解阻塞</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;"><span style="font-weight: bold;">错误处理</span></td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">API 内置</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">协议层定义</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">完全靠 prompt</td>
 </tr>
 <tr>
-<td style="padding: 8px 10px; border: 1px solid #ddd;"><span style="font-weight: bold;">审计追溯</span></td>
-<td style="padding: 8px 10px; border: 1px solid #ddd;">上下文压缩后丢失</td>
-<td style="padding: 8px 10px; border: 1px solid #ddd;">SQLite 中永久保留</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;"><span style="font-weight: bold;">流式支持</span></td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">✅</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">✅</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">❌</td>
 </tr>
 <tr>
-<td style="padding: 8px 10px; border: 1px solid #ddd;"><span style="font-weight: bold;">协调模式</span></td>
-<td style="padding: 8px 10px; border: 1px solid #ddd;">层级式（调用者 → 被调用者）</td>
-<td style="padding: 8px 10px; border: 1px solid #ddd;">对等——任何 Profile 可读写任何任务</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;"><span style="font-weight: bold;">并行调用</span></td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">✅</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">✅</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">❌</td>
+</tr>
+<tr>
+<td style="padding: 8px 10px; border: 1px solid #ddd;"><span style="font-weight: bold;">安全认证</span></td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">应用层实现</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">协议层支持</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">无</td>
+</tr>
+<tr>
+<td style="padding: 8px 10px; border: 1px solid #ddd;"><span style="font-weight: bold;">工具发现</span></td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">静态声明</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">动态发现</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">静态描述</td>
 </tr>
 </tbody>
 </table>
-<p style="margin: 1.5em 0;"><span style="font-weight: bold;">一句话区分</span>：<code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">delegate_task</code> 是<span style="font-weight: bold;">函数调用</span>，Kanban 是<span style="font-weight: bold;">工作队列</span>——每一次交接都是一行记录，任何 Agent（或人）都能看到并编辑。</p>
-<h3 style="font-size: 16px; font-weight: 700; color: rgb(0, 181, 173); margin: 1.2em 0 0.5em; padding: 5px 0;">1.2 Kanban Swarm 的核心架构</h3>
-<div class="codehilite"><pre style="background: #1e1e1e; color: #d4d4d4; padding: 14px; font-size: 13px; line-height: 1.45; white-space: pre; font-family: Menlo, Consolas, Courier, monospace; border-radius: 6px; overflow-x: auto; margin: 12px 0;"><span></span><code>┌─────────────────────────────────────────────────────────┐
-│                    Hermes Gateway                        │
-│  ┌──────────────────────────────────────────────────┐   │
-│  │              Dispatcher (调度器)                   │   │
-│  │  - 每 60 秒扫描一次                               │   │
-│  │  - 回收僵死任务、提升 ready 队列                    │   │
-│  │  - 自动分配任务到指定 Profile                       │   │
-│  └──────────────────────────────────────────────────┘   │
-│                         │                                │
-└─────────────────────────┼────────────────────────────────┘
-                          │
-              ┌───────────┴───────────┐
-              │    kanban.db (SQLite)  │
-              │   ┌─────────────────┐  │
-              │   │ tasks 表        │  │
-              │   │ task_links 表   │  │
-              │   │ comments 表     │  │
-              │   │ boards 表       │  │
-              │   └─────────────────┘  │
-              └───────────────────────┘
-                          │
-        ┌─────────────────┼─────────────────┐
-        │                 │                 │
-   researcher         writer            reviewer
-   (Profile)          (Profile)          (Profile)
-        │                 │                 │
-    kanban_show      kanban_show       kanban_show
-    kanban_complete   kanban_complete   kanban_complete
-    kanban_block      kanban_comment    kanban_heartbeat
-</code></pre></div>
-
-<p style="margin: 1.5em 0;"><span style="font-weight: bold;">关键设计决策</span>：</p>
-<ol style="margin: 0.8em 0; padding-left: 20px; list-style-type: decimal;">
-<li style="margin: 6px 0;"><span style="font-weight: bold;">SQLite 作持久化层</span>——零依赖、无需额外部署、每个任务记录永久保留</li>
-<li style="margin: 6px 0;"><span style="font-weight: bold;">State Machine 状态机</span>——任务在 <code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">triage → todo → ready → running → blocked → done → archived</code> 之间流转</li>
-<li style="margin: 6px 0;"><span style="font-weight: bold;">Worker 是完整 OS 进程</span>——每个工作 Agent 是一个独立的 Hermes 进程实例，拥有自己的 Profile、记忆、工具集</li>
-<li style="margin: 6px 0;"><span style="font-weight: bold;">Dispatcher 常驻网关</span>——默认运行在 Hermes Gateway 内部，每 60 秒一个 tick</li>
-</ol>
-<hr style="border: none; border-top: 1px solid #e0e0e0; margin: 20px 0;">
-<h2 style="font-size: 18px; font-weight: 700; color: #1a1a1a; margin: 20px 0 10px; padding-left: 10px; border-left: 3px solid #3866FF;">二、Kanban Swarm v1：一键生成 Swarm 拓扑</h2>
-<p style="margin: 1.5em 0;">在 v0.15.0 中，Hermes 引入了一个极具想象力的命令：<code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">hermes kanban swarm</code>。</p>
-<h3 style="font-size: 16px; font-weight: 700; color: rgb(0, 181, 173); margin: 1.2em 0 0.5em; padding: 5px 0;">2.1 Swarm 拓扑结构</h3>
-<p style="margin: 1.5em 0;">执行一条命令，就能生成一个完整的 Swarm v1 协作图：</p>
-<div class="codehilite"><pre style="background: #1e1e1e; color: #d4d4d4; padding: 14px; font-size: 13px; line-height: 1.45; white-space: pre; font-family: Menlo, Consolas, Courier, monospace; border-radius: 6px; overflow-x: auto; margin: 12px 0;"><span></span><code>hermes<span class="w"> </span>kanban<span class="w"> </span>swarm<span class="w"> </span><span class="s2">&quot;撰写一篇关于 Hermes Agent 的深度技术文章&quot;</span>
-</code></pre></div>
-
-<p style="margin: 1.5em 0;">这个命令会自动分解出：</p>
-<div class="codehilite"><pre style="background: #1e1e1e; color: #d4d4d4; padding: 14px; font-size: 13px; line-height: 1.45; white-space: pre; font-family: Menlo, Consolas, Courier, monospace; border-radius: 6px; overflow-x: auto; margin: 12px 0;"><span></span><code>                    ┌──────────────┐
-                    │  Root Task   │
-                    │  撰写技术文章 │
-                    └──────┬───────┘
-                           │
-            ┌──────────────┼──────────────┐
-            │              │              │
-     ┌──────▼──────┐ ┌─────▼──────┐ ┌─────▼──────┐
-     │  Worker 1   │ │  Worker 2  │ │  Worker 3  │
-     │  调研资料    │ │  撰写内容  │ │  代码验证   │
-     └──────┬──────┘ └─────┬──────┘ └─────┬──────┘
-            │              │              │
-            └──────────────┼──────────────┘
-                           │
-                    ┌──────▼──────┐
-                    │  Verifier   │
-                    │  四维审核   │
-                    └──────┬──────┘
-                           │
-                    ┌──────▼──────┐
-                    │ Synthesizer │
-                    │  整合发布   │
-                    └─────────────┘
-</code></pre></div>
-
-<p style="margin: 1.5em 0;">这个拓扑包含四个核心组件：</p>
-<ol style="margin: 0.8em 0; padding-left: 20px; list-style-type: decimal;">
-<li style="margin: 6px 0;"><span style="font-weight: bold;">Root Task（根任务）</span>——Swarm 的入口点，包含完整任务描述和目标</li>
-<li style="margin: 6px 0;"><span style="font-weight: bold;">Parallel Workers（并行工作者）</span>——可并行执行的子任务，各自分配给不同的 Profile</li>
-<li style="margin: 6px 0;"><span style="font-weight: bold;">Gated Verifier（门控验证器）</span>——等待所有 Worker 完成后，执行质量审核</li>
-<li style="margin: 6px 0;"><span style="font-weight: bold;">Gated Synthesizer（门控合成器）</span>——通过验证后，生成最终交付物</li>
-</ol>
-<h3 style="font-size: 16px; font-weight: 700; color: rgb(0, 181, 173); margin: 1.2em 0 0.5em; padding: 5px 0;">2.2 协作流程详解</h3>
-<p style="margin: 1.5em 0;">每个 Worker 的工作流：</p>
-<div class="codehilite"><pre style="background: #1e1e1e; color: #d4d4d4; padding: 14px; font-size: 13px; line-height: 1.45; white-space: pre; font-family: Menlo, Consolas, Courier, monospace; border-radius: 6px; overflow-x: auto; margin: 12px 0;"><span></span><code>任务创建 (triage)
-  ↓  Dispatcher 扫描并分配
-任务就绪 → 分配 (ready → running)
-  ↓  Worker 进程启动
-Worker 读取任务详情 + 历史评论
-  ↓
-执行工作 (调用工具、读写文件)
-  ↓  kanban_heartbeat 每 15 秒报告存活
-完成或阻塞
-  ↓
-kanban_complete → done
-  OR
-kanban_block → blocked (等待人工介入)
-</code></pre></div>
-
-<p style="margin: 1.5em 0;"><span style="font-weight: bold;">关键的 Heartbeat 机制</span>：Worker 在运行期间会定期发送心跳（<code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">kanban_heartbeat</code>）。如果 Dispatcher 发现某个任务的 PID 已消失但 TTL 未过期，它会自动回收这个任务并重新分配。这意味着即使 Worker 进程崩溃，任务也不会永远卡在 <code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">running</code> 状态。</p>
-<h3 style="font-size: 16px; font-weight: 700; color: rgb(0, 181, 173); margin: 1.2em 0 0.5em; padding: 5px 0;">2.3 任务状态流转图</h3>
-<div class="codehilite"><pre style="background: #1e1e1e; color: #d4d4d4; padding: 14px; font-size: 13px; line-height: 1.45; white-space: pre; font-family: Menlo, Consolas, Courier, monospace; border-radius: 6px; overflow-x: auto; margin: 12px 0;"><span></span><code>                     ┌──────────┐
-                     │  triage   │
-                     └────┬─────┘
-                          │ 人工或自动分解
-                     ┌────▼─────┐
-                     │   todo   │
-                     └────┬─────┘
-                          │ 所有前置依赖完成
-                     ┌────▼─────┐
-                     │  ready   │
-                     └────┬─────┘
-                          │ Dispatcher 分配
-              ┌───────────┼───────────┐
-              │           │           │
-         ┌────▼────┐ ┌───▼────┐  ┌───▼──────┐
-         │ running │ │blocked │  │ archived  │
-         └────┬────┘ └───┬────┘  └──────────┘
-              │           │
-              │      ┌────▼────┐
-              │      │  done   │  ← 解阻塞后 → ready
-              │      └────┬────┘
-              │           │
-              └───────────┘
-</code></pre></div>
-
-<hr style="border: none; border-top: 1px solid #e0e0e0; margin: 20px 0;">
-<h2 style="font-size: 18px; font-weight: 700; color: #1a1a1a; margin: 20px 0 10px; padding-left: 10px; border-left: 3px solid #3866FF;">三、v0.16.0 对 Kanban 的增强</h2>
-<p style="margin: 1.5em 0;">v0.16.0 不是 Kanban 的初始版本，但它带来的改进对生产级使用至关重要：</p>
-<h3 style="font-size: 16px; font-weight: 700; color: rgb(0, 181, 173); margin: 1.2em 0 0.5em; padding: 5px 0;">3.1 goal_mode 循环执行</h3>
-<div class="codehilite"><pre style="background: #1e1e1e; color: #d4d4d4; padding: 14px; font-size: 13px; line-height: 1.45; white-space: pre; font-family: Menlo, Consolas, Courier, monospace; border-radius: 6px; overflow-x: auto; margin: 12px 0;"><span></span><code><span class="c1"># 任务配置</span>
-<span class="nt">goal_mode</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
-<span class="nt">goal_prompt</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;持续监控日志目录，发现</span><span class="nv"> </span><span class="s">ERROR</span><span class="nv"> </span><span class="s">立即报告&quot;</span>
-</code></pre></div>
-
-<p style="margin: 1.5em 0;">当 <code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">goal_mode</code> 开启时，Worker 会进入 <code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">/goal</code> 循环模式——不是一次执行就结束，而是保持活跃、持续执行目标，直到手动终结或目标达成。</p>
-<p style="margin: 1.5em 0;"><span style="font-weight: bold;">适用场景</span>：</p>
-<ul style="margin: 0.8em 0; padding-left: 20px; list-style-type: disc;">
-<li style="margin: 6px 0;">日志监控与告警</li>
-<li style="margin: 6px 0;">定时数据采集与汇总</li>
-<li style="margin: 6px 0;">持续代码审查</li>
-</ul>
-<h3 style="font-size: 16px; font-weight: 700; color: rgb(0, 181, 173); margin: 1.2em 0 0.5em; padding: 5px 0;">3.2 文件附件与视觉能力</h3>
-<ul style="margin: 0.8em 0; padding-left: 20px; list-style-type: disc;">
-<li style="margin: 6px 0;">任务可以附带文件附件（代码、文档、图片）</li>
-<li style="margin: 6px 0;">如果任务 body 中引用了图片 URL，Worker 启动时会自动加载到视觉模型中</li>
-<li style="margin: 6px 0;">这意味着：你可以创建一个 "帮我审查这张 UI 设计图" 的任务，Worker 拿到后真的会用多模态模型看图分析</li>
-</ul>
-<h3 style="font-size: 16px; font-weight: 700; color: rgb(0, 181, 173); margin: 1.2em 0 0.5em; padding: 5px 0;">3.3 Per-Profile 并发控制</h3>
-<div class="codehilite"><pre style="background: #1e1e1e; color: #d4d4d4; padding: 14px; font-size: 13px; line-height: 1.45; white-space: pre; font-family: Menlo, Consolas, Courier, monospace; border-radius: 6px; overflow-x: auto; margin: 12px 0;"><span></span><code><span class="c1"># 在 Profile 配置中</span>
-<span class="nt">kanban</span><span class="p">:</span>
-<span class="w">  </span><span class="nt">concurrency</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">2</span><span class="w">  </span><span class="c1"># 该 Profile 最多同时运行 2 个任务</span>
-</code></pre></div>
-
-<p style="margin: 1.5em 0;">在 v0.16.0 之前，所有任务争抢同一 Profile 的进程。现在可以为每个 Profile 设置并发上限，防止一个 Profile 被塞满任务导致所有其他任务排队。同时 <code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">default_assignee</code> 回退机制确保无人认领的任务不会死在那里。</p>
-<h3 style="font-size: 16px; font-weight: 700; color: rgb(0, 181, 173); margin: 1.2em 0 0.5em; padding: 5px 0;">3.4 远程终结端点</h3>
-<p style="margin: 1.5em 0;">新增 <code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">POST /runs/{run_id}/terminate</code> 端点，允许通过 API 直接中止正在运行的任务——自动化流水线可以自助管理任务生命周期，不再需要手动介入。</p>
-<hr style="border: none; border-top: 1px solid #e0e0e0; margin: 20px 0;">
-<h2 style="font-size: 18px; font-weight: 700; color: #1a1a1a; margin: 20px 0 10px; padding-left: 10px; border-left: 3px solid #3866FF;">四、实战案例：用 Kanban Swarm 搭建博客流水线</h2>
-<p style="margin: 1.5em 0;">这是我实际用 Kanban Swarm 搭建的一个博客生产流水线，也是这篇文章本身的诞生方式：</p>
-<h3 style="font-size: 16px; font-weight: 700; color: rgb(0, 181, 173); margin: 1.2em 0 0.5em; padding: 5px 0;">4.1 流水线架构</h3>
-<div class="codehilite"><pre style="background: #1e1e1e; color: #d4d4d4; padding: 14px; font-size: 13px; line-height: 1.45; white-space: pre; font-family: Menlo, Consolas, Courier, monospace; border-radius: 6px; overflow-x: auto; margin: 12px 0;"><span></span><code>📱 微信收到主题
-    │
-    ▼
-🔀 orchestrator（任务拆解）
-  - 接收用户主题
-  - 自动分解为：调研 + 撰写 + 审核 + 发布
-  - 创建依赖链：调研→撰写→审核→发布
-    │
-    ▼
-🔬 researcher（小糊研究员）
-  - 模型：deepseek/deepseek-chat（低成本）
-  - 工具：搜索 + 终端 + 文件
-  - 输出：结构化研究报告
-    │
-    ▼
-✍️ writer（小糊撰稿人）
-  - 模型：deepseek-v4-flash（高质量）
-  - 推理：high
-  - 约束：字数 ≥ 2000
-  - 输出：完整 Markdown 文章
-    │
-    ▼
-✅ reviewer（四维审核员）
-  - 模型：deepseek-v4-flash
-  - 检查：技术准确性 / 逻辑完整性 / 信息时效性 / 可读性
-  - 输出：checklist 格式审核报告
-    │
-    ▼
-🚀 publisher（发布员）
-  - git commit → push → GitHub
-  - 微信公众号排版与发布
-</code></pre></div>
-
-<h3 style="font-size: 16px; font-weight: 700; color: rgb(0, 181, 173); margin: 1.2em 0 0.5em; padding: 5px 0;">4.2 核心设计要点</h3>
-<p style="margin: 1.5em 0;"><span style="font-weight: bold;">1. Profile 即角色</span>
-每个 Profile 是一个有明确身份和能力的 Agent。<code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">researcher</code> 用低成本模型（搜资料不需要大模型），<code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">writer</code> 用高质量模型（创作需要深度推理）。这在 Kanban Swarm 中天然支持——每个任务可以指定 <code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">model_override</code>，不同子任务用不同模型和推理级别，成本最优化：</p>
-<div class="codehilite"><pre style="background: #1e1e1e; color: #d4d4d4; padding: 14px; font-size: 13px; line-height: 1.45; white-space: pre; font-family: Menlo, Consolas, Courier, monospace; border-radius: 6px; overflow-x: auto; margin: 12px 0;"><span></span><code>hermes<span class="w"> </span>kanban<span class="w"> </span>create<span class="w"> </span><span class="s2">&quot;调研主题&quot;</span><span class="w"> </span>--assignee<span class="w"> </span>researcher<span class="w"> </span>--model<span class="w"> </span>deepseek/deepseek-chat
-hermes<span class="w"> </span>kanban<span class="w"> </span>create<span class="w"> </span><span class="s2">&quot;撰写文章&quot;</span><span class="w"> </span>--assignee<span class="w"> </span>writer<span class="w"> </span>--model<span class="w"> </span>deepseek-v4-flash<span class="w"> </span>--reasoning<span class="w"> </span>high
-</code></pre></div>
-
-<p style="margin: 1.5em 0;"><span style="font-weight: bold;">2. 依赖链即 Pipeline</span>
-通过 <code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">--link</code> 或 <code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">--parent</code> 参数创建父子依赖，Dispatcher 会自动按顺序推进：</p>
-<div class="codehilite"><pre style="background: #1e1e1e; color: #d4d4d4; padding: 14px; font-size: 13px; line-height: 1.45; white-space: pre; font-family: Menlo, Consolas, Courier, monospace; border-radius: 6px; overflow-x: auto; margin: 12px 0;"><span></span><code><span class="c1"># 创建依赖链</span>
-hermes<span class="w"> </span>kanban<span class="w"> </span>create<span class="w"> </span><span class="s2">&quot;撰写文章&quot;</span><span class="w"> </span>--parent<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$RESEARCH_TASK_ID</span><span class="s2">&quot;</span>
-hermes<span class="w"> </span>kanban<span class="w"> </span>create<span class="w"> </span><span class="s2">&quot;审核文章&quot;</span><span class="w"> </span>--parent<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$WRITE_TASK_ID</span><span class="s2">&quot;</span>
-hermes<span class="w"> </span>kanban<span class="w"> </span>create<span class="w"> </span><span class="s2">&quot;发布文章&quot;</span><span class="w"> </span>--parent<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$REVIEW_TASK_ID</span><span class="s2">&quot;</span>
-</code></pre></div>
-
-<p style="margin: 1.5em 0;"><span style="font-weight: bold;">3. 工作空间隔离</span>
-每个任务支持三种工作空间类型：</p>
+<h3 style="font-size: 16px; font-weight: 700; color: rgb(0, 181, 173); margin: 1.2em 0 0.5em; padding: 5px 0;">5.2 选型建议</h3>
 <table style="border-collapse: collapse; width: 100%; font-size: 14px; margin: 12px 0;">
 <thead>
 <tr>
-<th style="background: #3866FF; color: #fff; padding: 8px 10px; border: 1px solid #ddd; text-align: left; font-weight: 600;">类型</th>
-<th style="background: #3866FF; color: #fff; padding: 8px 10px; border: 1px solid #ddd; text-align: left; font-weight: 600;">说明</th>
-<th style="background: #3866FF; color: #fff; padding: 8px 10px; border: 1px solid #ddd; text-align: left; font-weight: 600;">生命周期</th>
+<th style="background: #3866FF; color: #fff; padding: 8px 10px; border: 1px solid #ddd; text-align: left; font-weight: 600;">场景</th>
+<th style="background: #3866FF; color: #fff; padding: 8px 10px; border: 1px solid #ddd; text-align: left; font-weight: 600;">推荐方案</th>
+<th style="background: #3866FF; color: #fff; padding: 8px 10px; border: 1px solid #ddd; text-align: left; font-weight: 600;">理由</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td style="padding: 8px 10px; border: 1px solid #ddd;"><code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">scratch</code>（默认）</td>
-<td style="padding: 8px 10px; border: 1px solid #ddd;">临时目录</td>
-<td style="padding: 8px 10px; border: 1px solid #ddd;">任务完成后删除，artifacts 保留</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">快速原型验证</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">Native Function Calling</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">零配置，开箱即用</td>
 </tr>
 <tr>
-<td style="padding: 8px 10px; border: 1px solid #ddd;"><code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">dir:/path</code></td>
-<td style="padding: 8px 10px; border: 1px solid #ddd;">已有目录</td>
-<td style="padding: 8px 10px; border: 1px solid #ddd;">永久保留</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">多模型迁移</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">MCP 协议</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">一次开发，多模型适配</td>
 </tr>
 <tr>
-<td style="padding: 8px 10px; border: 1px solid #ddd;"><code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">worktree:/project</code></td>
-<td style="padding: 8px 10px; border: 1px solid #ddd;">Git worktree</td>
-<td style="padding: 8px 10px; border: 1px solid #ddd;">永久保留，适合编码任务</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">企业级安全要求</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">MCP + SSE</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">协议层认证与审计</td>
+</tr>
+<tr>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">本地文件处理</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">MCP FileSystem Server</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">开箱即用，权限可控</td>
+</tr>
+<tr>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">云端微服务</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">MCP + Lambda Server</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">弹性伸缩，低延迟</td>
+</tr>
+<tr>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">开源模型部署</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">MCP + Llama 3</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">独立于 API 供应商</td>
 </tr>
 </tbody>
 </table>
-<p style="margin: 1.5em 0;">审核任务完成后，<code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">dir:</code> 目录中的最终 Markdown 直接由 Publisher 推送到 GitHub。</p>
-<p style="margin: 1.5em 0;"><span style="font-weight: bold;">4. 人工在环（Human-in-the-Loop）</span>
-Kanban 最强大的特性之一：任何人可以在任何时间点通过 <code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">kanban_comment</code> 或 CLI 的 <code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">hermes kanban comment</code> 在任务上留言。如果 Worker 发现需要人工决策，它可以直接 <code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">kanban_block</code> 并附带问题，等待人工回复后再 <code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">kanban_unblock</code> 继续执行。</p>
 <hr style="border: none; border-top: 1px solid #e0e0e0; margin: 20px 0;">
-<h2 style="font-size: 18px; font-weight: 700; color: #1a1a1a; margin: 20px 0 10px; padding-left: 10px; border-left: 3px solid #3866FF;">五、Kanban Swarm vs 其他多 Agent 方案</h2>
-<p style="margin: 1.5em 0;">理解 Kanban Swarm 的最好方式，是与当前主流的几种多 Agent 协作方案对比：</p>
-<table style="border-collapse: collapse; width: 100%; font-size: 14px; margin: 12px 0;">
-<thead>
-<tr>
-<th style="background: #3866FF; color: #fff; padding: 8px 10px; border: 1px solid #ddd; text-align: left; font-weight: 600;">方案</th>
-<th style="background: #3866FF; color: #fff; padding: 8px 10px; border: 1px solid #ddd; text-align: left; font-weight: 600;">协作模式</th>
-<th style="background: #3866FF; color: #fff; padding: 8px 10px; border: 1px solid #ddd; text-align: left; font-weight: 600;">持久化</th>
-<th style="background: #3866FF; color: #fff; padding: 8px 10px; border: 1px solid #ddd; text-align: left; font-weight: 600;">人工介入</th>
-<th style="background: #3866FF; color: #fff; padding: 8px 10px; border: 1px solid #ddd; text-align: left; font-weight: 600;">适用场景</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td style="padding: 8px 10px; border: 1px solid #ddd;"><span style="font-weight: bold;">Hermes Kanban</span></td>
-<td style="padding: 8px 10px; border: 1px solid #ddd;">对等看板</td>
-<td style="padding: 8px 10px; border: 1px solid #ddd;">✅ SQLite</td>
-<td style="padding: 8px 10px; border: 1px solid #ddd;">✅ 原生支持</td>
-<td style="padding: 8px 10px; border: 1px solid #ddd;">生产级工作流、跨日任务</td>
-</tr>
-<tr>
-<td style="padding: 8px 10px; border: 1px solid #ddd;"><span style="font-weight: bold;">OpenAI Swarm</span></td>
-<td style="padding: 8px 10px; border: 1px solid #ddd;">函数调用链</td>
-<td style="padding: 8px 10px; border: 1px solid #ddd;">❌ 无</td>
-<td style="padding: 8px 10px; border: 1px solid #ddd;">❌ 无</td>
-<td style="padding: 8px 10px; border: 1px solid #ddd;">实验性原型</td>
-</tr>
-<tr>
-<td style="padding: 8px 10px; border: 1px solid #ddd;"><span style="font-weight: bold;">AutoGen</span></td>
-<td style="padding: 8px 10px; border: 1px solid #ddd;">对话式</td>
-<td style="padding: 8px 10px; border: 1px solid #ddd;">❌ 无</td>
-<td style="padding: 8px 10px; border: 1px solid #ddd;">✅ 手动</td>
-<td style="padding: 8px 10px; border: 1px solid #ddd;">研究、对话式协作</td>
-</tr>
-<tr>
-<td style="padding: 8px 10px; border: 1px solid #ddd;"><span style="font-weight: bold;">CrewAI</span></td>
-<td style="padding: 8px 10px; border: 1px solid #ddd;">层级流程</td>
-<td style="padding: 8px 10px; border: 1px solid #ddd;">❌ 无</td>
-<td style="padding: 8px 10px; border: 1px solid #ddd;">❌ 无</td>
-<td style="padding: 8px 10px; border: 1px solid #ddd;">简单顺序任务</td>
-</tr>
-<tr>
-<td style="padding: 8px 10px; border: 1px solid #ddd;"><span style="font-weight: bold;">LangGraph</span></td>
-<td style="padding: 8px 10px; border: 1px solid #ddd;">图状态机</td>
-<td style="padding: 8px 10px; border: 1px solid #ddd;">❌ 内存中</td>
-<td style="padding: 8px 10px; border: 1px solid #ddd;">❌ 无</td>
-<td style="padding: 8px 10px; border: 1px solid #ddd;">需要精细控制的状态流</td>
-</tr>
-</tbody>
-</table>
-<p style="margin: 1.5em 0;">Kanban 的核心差异在于：<span style="font-weight: bold;">它不是一个"框架"而是一个"基础设施"</span>。它不定义 Agent 之间的通信协议（那是 LLM 自己搞定的），它只提供一个可靠的持久化工作队列——任何语言、任何框架、任何 Agent 只要会读写 SQLite 就能参与。</p>
-<hr style="border: none; border-top: 1px solid #e0e0e0; margin: 20px 0;">
-<h2 style="font-size: 18px; font-weight: 700; color: #1a1a1a; margin: 20px 0 10px; padding-left: 10px; border-left: 3px solid #3866FF;">六、最佳实践与陷阱</h2>
-<h3 style="font-size: 16px; font-weight: 700; color: rgb(0, 181, 173); margin: 1.2em 0 0.5em; padding: 5px 0;">✅ 推荐做法</h3>
+<h2 style="font-size: 18px; font-weight: 700; color: #1a1a1a; margin: 20px 0 10px; padding-left: 10px; border-left: 3px solid #3866FF;">六、未来展望</h2>
+<h3 style="font-size: 16px; font-weight: 700; color: rgb(0, 181, 173); margin: 1.2em 0 0.5em; padding: 5px 0;">6.1 工具调用的技术趋势</h3>
 <ol style="margin: 0.8em 0; padding-left: 20px; list-style-type: decimal;">
-<li style="margin: 6px 0;"><span style="font-weight: bold;">为每种角色创建独立 Profile</span>——不同 Profile 拥有不同的模型、记忆和工具集，这是 Kanban Swarm 的设计初衷</li>
-<li style="margin: 6px 0;"><span style="font-weight: bold;">善用 <code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">model_override</code></span>——搜索类任务用便宜的模型，创作和决策类任务用好模型，优化 Token 消耗</li>
-<li style="margin: 6px 0;"><span style="font-weight: bold;">设置合理的 TTL</span>——根据任务复杂度调整 <code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">claim_ttl</code>，太短会导致 Worker 被过早回收，太长会导致崩溃任务长期不释放</li>
-<li style="margin: 6px 0;"><span style="font-weight: bold;">使用 <code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">dir:</code> 工作空间</span>——当任务处理的数据需要长期保留时，用 <code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">dir:/path</code> 替代默认的 <code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">scratch</code>，避免数据丢失</li>
-<li style="margin: 6px 0;"><span style="font-weight: bold;">拥抱人工在环</span>——不要试图让流水线完全自动化。复杂决策节点设置 <code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">kanban_block</code> 等待人工确认，是保证质量的关键</li>
+<li>
+<p style="margin: 1.5em 0;"><span style="font-weight: bold;">多模态工具调用</span>：LLM 不仅能调用 API，还能直接操作 GUI（Computer Use）、控制浏览器、调用图像生成工具等</p>
+</li>
+<li>
+<p style="margin: 1.5em 0;"><span style="font-weight: bold;">工具调用安全</span>：引入"工具防火墙"——在 LLM 和工具之间加入策略引擎，防止注入攻击和权限滥用</p>
+</li>
+<li>
+<p style="margin: 1.5em 0;"><span style="font-weight: bold;">工具链的自动化组合</span>：不再需要手动编排，LLM 自治地将多个工具组合成复杂工作流</p>
+</li>
+<li>
+<p style="margin: 1.5em 0;"><span style="font-weight: bold;">Agent-to-Agent 协议</span>：一个 Agent 的工具调用结果可以被另一个 Agent 作为输入，MCP 可能演进为 Agent 间的通信协议</p>
+</li>
 </ol>
-<h3 style="font-size: 16px; font-weight: 700; color: rgb(0, 181, 173); margin: 1.2em 0 0.5em; padding: 5px 0;">❌ 常见误区</h3>
-<ol style="margin: 0.8em 0; padding-left: 20px; list-style-type: decimal;">
-<li style="margin: 6px 0;"><span style="font-weight: bold;">用 Kanban 做实时交互</span>——Dispatcer 默认 60 秒扫描间隔，不适合需要秒级响应的场景。实时交互请用 <code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">delegate_task</code></li>
-<li style="margin: 6px 0;"><span style="font-weight: bold;">所有任务都用同一个 Profile</span>——身份模糊的 Agent 做不好任何事。给不同角色不同的 Profile</li>
-<li style="margin: 6px 0;"><span style="font-weight: bold;">忽略 Heartbeat</span>——长时间运行的任务应该调用 <code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">kanban_heartbeat</code>，否则被 Dispatcher 误回收会前功尽弃</li>
-<li style="margin: 6px 0;"><span style="font-weight: bold;">单个 Board 塞太多无关任务</span>——不同项目应该用不同的 Board，而不是一个 Board 里塞满杂项。<code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">hermes kanban board create project-name</code> 即可</li>
-</ol>
-<hr style="border: none; border-top: 1px solid #e0e0e0; margin: 20px 0;">
-<h2 style="font-size: 18px; font-weight: 700; color: #1a1a1a; margin: 20px 0 10px; padding-left: 10px; border-left: 3px solid #3866FF;">七、未来展望</h2>
-<p style="margin: 1.5em 0;">从 v0.15.0 到 v0.16.0，Kanban 系统经历了 104+ PR 的重塑。从我的观察来看，Kanban Swarm 正在从"一个实验性功能"进化为"Hermes 多 Agent 编排的默认范式"。</p>
-<p style="margin: 1.5em 0;">几个值得关注的演进方向：</p>
+<h3 style="font-size: 16px; font-weight: 700; color: rgb(0, 181, 173); margin: 1.2em 0 0.5em; padding: 5px 0;">6.2 对开发者的建议</h3>
 <ul style="margin: 0.8em 0; padding-left: 20px; list-style-type: disc;">
-<li style="margin: 6px 0;"><span style="font-weight: bold;">跨主机 Board</span>——目前 Kanban 是单机设计，未来可能支持分布式 Board，让不同机器上的 Agent 协作</li>
-<li style="margin: 6px 0;"><span style="font-weight: bold;">动态拓扑重配置</span>——v1 的 Swarm 拓扑是静态生成的，未来的 Dispatcher 可能能在运行时根据任务进度动态调整拓扑</li>
-<li style="margin: 6px 0;"><span style="font-weight: bold;">RAG 增强的任务分解</span>——Orchestrator 可以结合知识库，将用户需求更精确地分解为可执行的子任务</li>
+<li style="margin: 6px 0;"><span style="font-weight: bold;">拥抱标准</span>：尽量基于 MCP 协议开发工具，而非绑定单一供应商的私有格式</li>
+<li style="margin: 6px 0;"><span style="font-weight: bold;">关注可靠性</span>：工具调用是"Action"层面，失败的影响远大于"对话"层面——做好容错、记录审计日志</li>
+<li style="margin: 6px 0;"><span style="font-weight: bold;">控制成本</span>：每次工具调用都意味着额外的 API 调用和 token 消耗，设计缓存策略和结果复用机制</li>
+<li style="margin: 6px 0;"><span style="font-weight: bold;">安全第一</span>：永远不要将 LLM 的决策直接映射为系统操作，需要经过权限校验和人工确认的"安全闸门"</li>
 </ul>
 <hr style="border: none; border-top: 1px solid #e0e0e0; margin: 20px 0;">
-<h2 style="font-size: 18px; font-weight: 700; color: #1a1a1a; margin: 20px 0 10px; padding-left: 10px; border-left: 3px solid #3866FF;">结语</h2>
-<p style="margin: 1.5em 0;">Kanban Swarm 是一个简单但不简陋的设计。它没有引入复杂的新协议，没有要求你学习新的编排语言，没有强迫你改变 Agent 的写作方式——它只是在所有 Agent 之间放了一个 SQLite 数据库，然后说："你们看完留言板上写下你的结果，下一个自然有人接上。"</p>
-<p style="margin: 1.5em 0;">这种"薄层编排"的设计哲学——用最少的约束实现最大的灵活性——正是 Hermes Agent 一直以来的风格。它不是告诉你"应该怎么用 AI Agent"，而是给你一个工具箱，让你自己决定"我的 AI Agent 应该怎么协作"。</p>
-<p style="margin: 1.5em 0;">而对于像我这样需要同时管理多个 AI Agent 的开发者来说，Kanban Swarm 最珍贵的不是那个 Swarm 拓扑生成器，也不是那个 Dispatcher 自动回收机制——而是它让我可以晚上睡觉前创建一个任务，第二天醒来时看到它已经经过了调研、撰写、审核、发布四个节点，整齐地排在我的 GitHub 上。</p>
-<p style="margin: 1.5em 0;"><span style="font-weight: bold;">这就是 AI Agent 基础设施该有的样子：它不在你面前晃悠，但你的活儿干完了。</span></p>
+<h2 style="font-size: 18px; font-weight: 700; color: #1a1a1a; margin: 20px 0 10px; padding-left: 10px; border-left: 3px solid #3866FF;">参考资料</h2>
+<ol style="margin: 0.8em 0; padding-left: 20px; list-style-type: decimal;">
+<li style="margin: 6px 0;">OpenAI Function Calling 文档 - https://platform.openai.com/docs/guides/function-calling</li>
+<li style="margin: 6px 0;">Anthropic Tool Use 文档 - https://docs.anthropic.com/en/docs/build-with-claude/tool-use</li>
+<li style="margin: 6px 0;">Model Context Protocol 规范 - https://modelcontextprotocol.io/</li>
+<li style="margin: 6px 0;">Hermes Agent 文档 - https://hermes-agent.nousresearch.com/docs</li>
+<li style="margin: 6px 0;">ReAct: Synergizing Reasoning and Acting in Language Models - https://arxiv.org/abs/2210.03629</li>
+<li style="margin: 6px 0;">Toolformer: Language Models Can Teach Themselves to Use Tools - https://arxiv.org/abs/2302.04761</li>
+</ol>
 <hr style="border: none; border-top: 1px solid #e0e0e0; margin: 20px 0;">
-<p style="margin: 1.5em 0;"><em>本文由 Hermes Agent Kanban Swarm 流水线自动生成：researcher 调研 → writer 撰写 → reviewer 审核 → publisher 发布。</em></p>
-<p style="margin: 1.5em 0;"><em>源码仓库：https://github.com/jxlyc050616/hermes-agent-blog</em></p>
+<p style="margin: 1.5em 0;"><em>本文由小糊涂虫原创于 2026-07-14。转载请注明出处。</em></p>
