@@ -1,0 +1,384 @@
+<h1 style="font-size: 20px; font-weight: 700; color: #1a1a1a; margin: 24px 0 12px; padding: 0 0 8px; border-bottom: 2px solid #3866FF;">Hermes Agent v0.16 Kanban Swarm 深度解析：当 AI Agent 有了自己的协作流水线</h1>
+<h2 style="font-size: 18px; font-weight: 700; color: #1a1a1a; margin: 20px 0 10px; padding-left: 10px; border-left: 3px solid #3866FF;">引言</h2>
+<p style="margin: 1.5em 0;">2026年6月5日，Nous Research 发布了 Hermes Agent v0.16.0（代号"The Surface Release"）。这个版本的核心惊喜并不在标题中的桌面应用和仪表盘——那些只是改变了你与 Agent 交互的"表面"。真正值得 AI 开发者关注的，是一个在 v0.15.0 诞生、在 v0.16.0 进一步打磨的底层能力：<span style="font-weight: bold;">Kanban Swarm——多智能体协作工作流引擎</span>。</p>
+<p style="margin: 1.5em 0;">如果你还在手动编排多个 AI Agent，或者在 <code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">delegate_task</code> 的树形调用链里头疼，那么 Kanban Swarm 可能会彻底改变你组织 AI 工作流的方式。</p>
+<blockquote style="margin: 14px 0; padding: 12px 16px; background: #f5f7fa; border-left: 4px solid #3866FF; color: #555; font-size: 14px; border-radius: 0 4px 4px 0;">
+<p style="margin: 1.5em 0;"><span style="font-weight: bold;">一句话概括</span>：Kanban Swarm 是一个基于 SQLite 的持久化任务看板，让多个 AI Agent（不同 Profile）像工厂流水线一样协作——任务状态持久化、断点续传、人工介入、审计追溯，所有 Agent 之间通过看板行通信，不再依赖脆弱的进程内调用链。</p>
+</blockquote>
+<hr style="border: none; border-top: 1px solid #e0e0e0; margin: 20px 0;">
+<h2 style="font-size: 18px; font-weight: 700; color: #1a1a1a; margin: 20px 0 10px; padding-left: 10px; border-left: 3px solid #3866FF;">一、架构全景：从 <code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">delegate_task</code> 到 Kanban</h2>
+<p style="margin: 1.5em 0;">在理解 Kanban Swarm 之前，先要理解它解决的是什么问题。</p>
+<h3 style="font-size: 16px; font-weight: 700; color: rgb(0, 181, 173); margin: 1.2em 0 0.5em; padding: 5px 0;">1.1 <code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">delegate_task</code> 的局限</h3>
+<p style="margin: 1.5em 0;">Hermes 的 <code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">delegate_task</code> 是一个强大的 RPC 式子代理机制：主 Agent fork 出一个子 Agent 执行任务，等它完成后拿到结果，继续往下走。但它的设计本质决定了几个难以逾越的局限：</p>
+<table style="border-collapse: collapse; width: 100%; font-size: 14px; margin: 12px 0;">
+<thead>
+<tr>
+<th style="background: #3866FF; color: #fff; padding: 8px 10px; border: 1px solid #ddd; text-align: left; font-weight: 600;">维度</th>
+<th style="background: #3866FF; color: #fff; padding: 8px 10px; border: 1px solid #ddd; text-align: left; font-weight: 600;"><code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">delegate_task</code></th>
+<th style="background: #3866FF; color: #fff; padding: 8px 10px; border: 1px solid #ddd; text-align: left; font-weight: 600;">Kanban Swarm</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="padding: 8px 10px; border: 1px solid #ddd;"><span style="font-weight: bold;">形态</span></td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">RPC 调用（fork → join）</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">持久化消息队列 + 状态机</td>
+</tr>
+<tr>
+<td style="padding: 8px 10px; border: 1px solid #ddd;"><span style="font-weight: bold;">父进程</span></td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">阻塞等待子进程返回</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">fire-and-forget，创建后立即返回</td>
+</tr>
+<tr>
+<td style="padding: 8px 10px; border: 1px solid #ddd;"><span style="font-weight: bold;">子进程标识</span></td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">匿名子 Agent</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">具名 Profile，带持久化记忆</td>
+</tr>
+<tr>
+<td style="padding: 8px 10px; border: 1px solid #ddd;"><span style="font-weight: bold;">断点续传</span></td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">不支持——失败即失败</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">阻塞 → 解阻塞 → 重试；崩溃 → 回收</td>
+</tr>
+<tr>
+<td style="padding: 8px 10px; border: 1px solid #ddd;"><span style="font-weight: bold;">人工介入</span></td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">不支持</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">随时评论和解阻塞</td>
+</tr>
+<tr>
+<td style="padding: 8px 10px; border: 1px solid #ddd;"><span style="font-weight: bold;">审计追溯</span></td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">上下文压缩后丢失</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">SQLite 中永久保留</td>
+</tr>
+<tr>
+<td style="padding: 8px 10px; border: 1px solid #ddd;"><span style="font-weight: bold;">协调模式</span></td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">层级式（调用者 → 被调用者）</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">对等——任何 Profile 可读写任何任务</td>
+</tr>
+</tbody>
+</table>
+<p style="margin: 1.5em 0;"><span style="font-weight: bold;">一句话区分</span>：<code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">delegate_task</code> 是<span style="font-weight: bold;">函数调用</span>，Kanban 是<span style="font-weight: bold;">工作队列</span>——每一次交接都是一行记录，任何 Agent（或人）都能看到并编辑。</p>
+<h3 style="font-size: 16px; font-weight: 700; color: rgb(0, 181, 173); margin: 1.2em 0 0.5em; padding: 5px 0;">1.2 Kanban Swarm 的核心架构</h3>
+<div class="codehilite"><pre style="background: #1e1e1e; color: #d4d4d4; padding: 14px; font-size: 13px; line-height: 1.45; white-space: pre; font-family: Menlo, Consolas, Courier, monospace; border-radius: 6px; overflow-x: auto; margin: 12px 0;"><span></span><code>┌─────────────────────────────────────────────────────────┐
+│                    Hermes Gateway                        │
+│  ┌──────────────────────────────────────────────────┐   │
+│  │              Dispatcher (调度器)                   │   │
+│  │  - 每 60 秒扫描一次                               │   │
+│  │  - 回收僵死任务、提升 ready 队列                    │   │
+│  │  - 自动分配任务到指定 Profile                       │   │
+│  └──────────────────────────────────────────────────┘   │
+│                         │                                │
+└─────────────────────────┼────────────────────────────────┘
+                          │
+              ┌───────────┴───────────┐
+              │    kanban.db (SQLite)  │
+              │   ┌─────────────────┐  │
+              │   │ tasks 表        │  │
+              │   │ task_links 表   │  │
+              │   │ comments 表     │  │
+              │   │ boards 表       │  │
+              │   └─────────────────┘  │
+              └───────────────────────┘
+                          │
+        ┌─────────────────┼─────────────────┐
+        │                 │                 │
+   researcher         writer            reviewer
+   (Profile)          (Profile)          (Profile)
+        │                 │                 │
+    kanban_show      kanban_show       kanban_show
+    kanban_complete   kanban_complete   kanban_complete
+    kanban_block      kanban_comment    kanban_heartbeat
+</code></pre></div>
+
+<p style="margin: 1.5em 0;"><span style="font-weight: bold;">关键设计决策</span>：</p>
+<ol style="margin: 0.8em 0; padding-left: 20px; list-style-type: decimal;">
+<li style="margin: 6px 0;"><span style="font-weight: bold;">SQLite 作持久化层</span>——零依赖、无需额外部署、每个任务记录永久保留</li>
+<li style="margin: 6px 0;"><span style="font-weight: bold;">State Machine 状态机</span>——任务在 <code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">triage → todo → ready → running → blocked → done → archived</code> 之间流转</li>
+<li style="margin: 6px 0;"><span style="font-weight: bold;">Worker 是完整 OS 进程</span>——每个工作 Agent 是一个独立的 Hermes 进程实例，拥有自己的 Profile、记忆、工具集</li>
+<li style="margin: 6px 0;"><span style="font-weight: bold;">Dispatcher 常驻网关</span>——默认运行在 Hermes Gateway 内部，每 60 秒一个 tick</li>
+</ol>
+<hr style="border: none; border-top: 1px solid #e0e0e0; margin: 20px 0;">
+<h2 style="font-size: 18px; font-weight: 700; color: #1a1a1a; margin: 20px 0 10px; padding-left: 10px; border-left: 3px solid #3866FF;">二、Kanban Swarm v1：一键生成 Swarm 拓扑</h2>
+<p style="margin: 1.5em 0;">在 v0.15.0 中，Hermes 引入了一个极具想象力的命令：<code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">hermes kanban swarm</code>。</p>
+<h3 style="font-size: 16px; font-weight: 700; color: rgb(0, 181, 173); margin: 1.2em 0 0.5em; padding: 5px 0;">2.1 Swarm 拓扑结构</h3>
+<p style="margin: 1.5em 0;">执行一条命令，就能生成一个完整的 Swarm v1 协作图：</p>
+<div class="codehilite"><pre style="background: #1e1e1e; color: #d4d4d4; padding: 14px; font-size: 13px; line-height: 1.45; white-space: pre; font-family: Menlo, Consolas, Courier, monospace; border-radius: 6px; overflow-x: auto; margin: 12px 0;"><span></span><code>hermes<span class="w"> </span>kanban<span class="w"> </span>swarm<span class="w"> </span><span class="s2">&quot;撰写一篇关于 Hermes Agent 的深度技术文章&quot;</span>
+</code></pre></div>
+
+<p style="margin: 1.5em 0;">这个命令会自动分解出：</p>
+<div class="codehilite"><pre style="background: #1e1e1e; color: #d4d4d4; padding: 14px; font-size: 13px; line-height: 1.45; white-space: pre; font-family: Menlo, Consolas, Courier, monospace; border-radius: 6px; overflow-x: auto; margin: 12px 0;"><span></span><code>                    ┌──────────────┐
+                    │  Root Task   │
+                    │  撰写技术文章 │
+                    └──────┬───────┘
+                           │
+            ┌──────────────┼──────────────┐
+            │              │              │
+     ┌──────▼──────┐ ┌─────▼──────┐ ┌─────▼──────┐
+     │  Worker 1   │ │  Worker 2  │ │  Worker 3  │
+     │  调研资料    │ │  撰写内容  │ │  代码验证   │
+     └──────┬──────┘ └─────┬──────┘ └─────┬──────┘
+            │              │              │
+            └──────────────┼──────────────┘
+                           │
+                    ┌──────▼──────┐
+                    │  Verifier   │
+                    │  四维审核   │
+                    └──────┬──────┘
+                           │
+                    ┌──────▼──────┐
+                    │ Synthesizer │
+                    │  整合发布   │
+                    └─────────────┘
+</code></pre></div>
+
+<p style="margin: 1.5em 0;">这个拓扑包含四个核心组件：</p>
+<ol style="margin: 0.8em 0; padding-left: 20px; list-style-type: decimal;">
+<li style="margin: 6px 0;"><span style="font-weight: bold;">Root Task（根任务）</span>——Swarm 的入口点，包含完整任务描述和目标</li>
+<li style="margin: 6px 0;"><span style="font-weight: bold;">Parallel Workers（并行工作者）</span>——可并行执行的子任务，各自分配给不同的 Profile</li>
+<li style="margin: 6px 0;"><span style="font-weight: bold;">Gated Verifier（门控验证器）</span>——等待所有 Worker 完成后，执行质量审核</li>
+<li style="margin: 6px 0;"><span style="font-weight: bold;">Gated Synthesizer（门控合成器）</span>——通过验证后，生成最终交付物</li>
+</ol>
+<h3 style="font-size: 16px; font-weight: 700; color: rgb(0, 181, 173); margin: 1.2em 0 0.5em; padding: 5px 0;">2.2 协作流程详解</h3>
+<p style="margin: 1.5em 0;">每个 Worker 的工作流：</p>
+<div class="codehilite"><pre style="background: #1e1e1e; color: #d4d4d4; padding: 14px; font-size: 13px; line-height: 1.45; white-space: pre; font-family: Menlo, Consolas, Courier, monospace; border-radius: 6px; overflow-x: auto; margin: 12px 0;"><span></span><code>任务创建 (triage)
+  ↓  Dispatcher 扫描并分配
+任务就绪 → 分配 (ready → running)
+  ↓  Worker 进程启动
+Worker 读取任务详情 + 历史评论
+  ↓
+执行工作 (调用工具、读写文件)
+  ↓  kanban_heartbeat 每 15 秒报告存活
+完成或阻塞
+  ↓
+kanban_complete → done
+  OR
+kanban_block → blocked (等待人工介入)
+</code></pre></div>
+
+<p style="margin: 1.5em 0;"><span style="font-weight: bold;">关键的 Heartbeat 机制</span>：Worker 在运行期间会定期发送心跳（<code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">kanban_heartbeat</code>）。如果 Dispatcher 发现某个任务的 PID 已消失但 TTL 未过期，它会自动回收这个任务并重新分配。这意味着即使 Worker 进程崩溃，任务也不会永远卡在 <code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">running</code> 状态。</p>
+<h3 style="font-size: 16px; font-weight: 700; color: rgb(0, 181, 173); margin: 1.2em 0 0.5em; padding: 5px 0;">2.3 任务状态流转图</h3>
+<div class="codehilite"><pre style="background: #1e1e1e; color: #d4d4d4; padding: 14px; font-size: 13px; line-height: 1.45; white-space: pre; font-family: Menlo, Consolas, Courier, monospace; border-radius: 6px; overflow-x: auto; margin: 12px 0;"><span></span><code>                     ┌──────────┐
+                     │  triage   │
+                     └────┬─────┘
+                          │ 人工或自动分解
+                     ┌────▼─────┐
+                     │   todo   │
+                     └────┬─────┘
+                          │ 所有前置依赖完成
+                     ┌────▼─────┐
+                     │  ready   │
+                     └────┬─────┘
+                          │ Dispatcher 分配
+              ┌───────────┼───────────┐
+              │           │           │
+         ┌────▼────┐ ┌───▼────┐  ┌───▼──────┐
+         │ running │ │blocked │  │ archived  │
+         └────┬────┘ └───┬────┘  └──────────┘
+              │           │
+              │      ┌────▼────┐
+              │      │  done   │  ← 解阻塞后 → ready
+              │      └────┬────┘
+              │           │
+              └───────────┘
+</code></pre></div>
+
+<hr style="border: none; border-top: 1px solid #e0e0e0; margin: 20px 0;">
+<h2 style="font-size: 18px; font-weight: 700; color: #1a1a1a; margin: 20px 0 10px; padding-left: 10px; border-left: 3px solid #3866FF;">三、v0.16.0 对 Kanban 的增强</h2>
+<p style="margin: 1.5em 0;">v0.16.0 不是 Kanban 的初始版本，但它带来的改进对生产级使用至关重要：</p>
+<h3 style="font-size: 16px; font-weight: 700; color: rgb(0, 181, 173); margin: 1.2em 0 0.5em; padding: 5px 0;">3.1 goal_mode 循环执行</h3>
+<div class="codehilite"><pre style="background: #1e1e1e; color: #d4d4d4; padding: 14px; font-size: 13px; line-height: 1.45; white-space: pre; font-family: Menlo, Consolas, Courier, monospace; border-radius: 6px; overflow-x: auto; margin: 12px 0;"><span></span><code><span class="c1"># 任务配置</span>
+<span class="nt">goal_mode</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="nt">goal_prompt</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;持续监控日志目录，发现</span><span class="nv"> </span><span class="s">ERROR</span><span class="nv"> </span><span class="s">立即报告&quot;</span>
+</code></pre></div>
+
+<p style="margin: 1.5em 0;">当 <code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">goal_mode</code> 开启时，Worker 会进入 <code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">/goal</code> 循环模式——不是一次执行就结束，而是保持活跃、持续执行目标，直到手动终结或目标达成。</p>
+<p style="margin: 1.5em 0;"><span style="font-weight: bold;">适用场景</span>：</p>
+<ul style="margin: 0.8em 0; padding-left: 20px; list-style-type: disc;">
+<li style="margin: 6px 0;">日志监控与告警</li>
+<li style="margin: 6px 0;">定时数据采集与汇总</li>
+<li style="margin: 6px 0;">持续代码审查</li>
+</ul>
+<h3 style="font-size: 16px; font-weight: 700; color: rgb(0, 181, 173); margin: 1.2em 0 0.5em; padding: 5px 0;">3.2 文件附件与视觉能力</h3>
+<ul style="margin: 0.8em 0; padding-left: 20px; list-style-type: disc;">
+<li style="margin: 6px 0;">任务可以附带文件附件（代码、文档、图片）</li>
+<li style="margin: 6px 0;">如果任务 body 中引用了图片 URL，Worker 启动时会自动加载到视觉模型中</li>
+<li style="margin: 6px 0;">这意味着：你可以创建一个 "帮我审查这张 UI 设计图" 的任务，Worker 拿到后真的会用多模态模型看图分析</li>
+</ul>
+<h3 style="font-size: 16px; font-weight: 700; color: rgb(0, 181, 173); margin: 1.2em 0 0.5em; padding: 5px 0;">3.3 Per-Profile 并发控制</h3>
+<div class="codehilite"><pre style="background: #1e1e1e; color: #d4d4d4; padding: 14px; font-size: 13px; line-height: 1.45; white-space: pre; font-family: Menlo, Consolas, Courier, monospace; border-radius: 6px; overflow-x: auto; margin: 12px 0;"><span></span><code><span class="c1"># 在 Profile 配置中</span>
+<span class="nt">kanban</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">concurrency</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">2</span><span class="w">  </span><span class="c1"># 该 Profile 最多同时运行 2 个任务</span>
+</code></pre></div>
+
+<p style="margin: 1.5em 0;">在 v0.16.0 之前，所有任务争抢同一 Profile 的进程。现在可以为每个 Profile 设置并发上限，防止一个 Profile 被塞满任务导致所有其他任务排队。同时 <code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">default_assignee</code> 回退机制确保无人认领的任务不会死在那里。</p>
+<h3 style="font-size: 16px; font-weight: 700; color: rgb(0, 181, 173); margin: 1.2em 0 0.5em; padding: 5px 0;">3.4 远程终结端点</h3>
+<p style="margin: 1.5em 0;">新增 <code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">POST /runs/{run_id}/terminate</code> 端点，允许通过 API 直接中止正在运行的任务——自动化流水线可以自助管理任务生命周期，不再需要手动介入。</p>
+<hr style="border: none; border-top: 1px solid #e0e0e0; margin: 20px 0;">
+<h2 style="font-size: 18px; font-weight: 700; color: #1a1a1a; margin: 20px 0 10px; padding-left: 10px; border-left: 3px solid #3866FF;">四、实战案例：用 Kanban Swarm 搭建博客流水线</h2>
+<p style="margin: 1.5em 0;">这是我实际用 Kanban Swarm 搭建的一个博客生产流水线，也是这篇文章本身的诞生方式：</p>
+<h3 style="font-size: 16px; font-weight: 700; color: rgb(0, 181, 173); margin: 1.2em 0 0.5em; padding: 5px 0;">4.1 流水线架构</h3>
+<div class="codehilite"><pre style="background: #1e1e1e; color: #d4d4d4; padding: 14px; font-size: 13px; line-height: 1.45; white-space: pre; font-family: Menlo, Consolas, Courier, monospace; border-radius: 6px; overflow-x: auto; margin: 12px 0;"><span></span><code>📱 微信收到主题
+    │
+    ▼
+🔀 orchestrator（任务拆解）
+  - 接收用户主题
+  - 自动分解为：调研 + 撰写 + 审核 + 发布
+  - 创建依赖链：调研→撰写→审核→发布
+    │
+    ▼
+🔬 researcher（小糊研究员）
+  - 模型：deepseek/deepseek-chat（低成本）
+  - 工具：搜索 + 终端 + 文件
+  - 输出：结构化研究报告
+    │
+    ▼
+✍️ writer（小糊撰稿人）
+  - 模型：deepseek-v4-flash（高质量）
+  - 推理：high
+  - 约束：字数 ≥ 2000
+  - 输出：完整 Markdown 文章
+    │
+    ▼
+✅ reviewer（四维审核员）
+  - 模型：deepseek-v4-flash
+  - 检查：技术准确性 / 逻辑完整性 / 信息时效性 / 可读性
+  - 输出：checklist 格式审核报告
+    │
+    ▼
+🚀 publisher（发布员）
+  - git commit → push → GitHub
+  - 微信公众号排版与发布
+</code></pre></div>
+
+<h3 style="font-size: 16px; font-weight: 700; color: rgb(0, 181, 173); margin: 1.2em 0 0.5em; padding: 5px 0;">4.2 核心设计要点</h3>
+<p style="margin: 1.5em 0;"><span style="font-weight: bold;">1. Profile 即角色</span>
+每个 Profile 是一个有明确身份和能力的 Agent。<code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">researcher</code> 用低成本模型（搜资料不需要大模型），<code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">writer</code> 用高质量模型（创作需要深度推理）。这在 Kanban Swarm 中天然支持——每个任务可以指定 <code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">model_override</code>，不同子任务用不同模型和推理级别，成本最优化：</p>
+<div class="codehilite"><pre style="background: #1e1e1e; color: #d4d4d4; padding: 14px; font-size: 13px; line-height: 1.45; white-space: pre; font-family: Menlo, Consolas, Courier, monospace; border-radius: 6px; overflow-x: auto; margin: 12px 0;"><span></span><code>hermes<span class="w"> </span>kanban<span class="w"> </span>create<span class="w"> </span><span class="s2">&quot;调研主题&quot;</span><span class="w"> </span>--assignee<span class="w"> </span>researcher<span class="w"> </span>--model<span class="w"> </span>deepseek/deepseek-chat
+hermes<span class="w"> </span>kanban<span class="w"> </span>create<span class="w"> </span><span class="s2">&quot;撰写文章&quot;</span><span class="w"> </span>--assignee<span class="w"> </span>writer<span class="w"> </span>--model<span class="w"> </span>deepseek-v4-flash<span class="w"> </span>--reasoning<span class="w"> </span>high
+</code></pre></div>
+
+<p style="margin: 1.5em 0;"><span style="font-weight: bold;">2. 依赖链即 Pipeline</span>
+通过 <code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">--link</code> 或 <code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">--parent</code> 参数创建父子依赖，Dispatcher 会自动按顺序推进：</p>
+<div class="codehilite"><pre style="background: #1e1e1e; color: #d4d4d4; padding: 14px; font-size: 13px; line-height: 1.45; white-space: pre; font-family: Menlo, Consolas, Courier, monospace; border-radius: 6px; overflow-x: auto; margin: 12px 0;"><span></span><code><span class="c1"># 创建依赖链</span>
+hermes<span class="w"> </span>kanban<span class="w"> </span>create<span class="w"> </span><span class="s2">&quot;撰写文章&quot;</span><span class="w"> </span>--parent<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$RESEARCH_TASK_ID</span><span class="s2">&quot;</span>
+hermes<span class="w"> </span>kanban<span class="w"> </span>create<span class="w"> </span><span class="s2">&quot;审核文章&quot;</span><span class="w"> </span>--parent<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$WRITE_TASK_ID</span><span class="s2">&quot;</span>
+hermes<span class="w"> </span>kanban<span class="w"> </span>create<span class="w"> </span><span class="s2">&quot;发布文章&quot;</span><span class="w"> </span>--parent<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$REVIEW_TASK_ID</span><span class="s2">&quot;</span>
+</code></pre></div>
+
+<p style="margin: 1.5em 0;"><span style="font-weight: bold;">3. 工作空间隔离</span>
+每个任务支持三种工作空间类型：</p>
+<table style="border-collapse: collapse; width: 100%; font-size: 14px; margin: 12px 0;">
+<thead>
+<tr>
+<th style="background: #3866FF; color: #fff; padding: 8px 10px; border: 1px solid #ddd; text-align: left; font-weight: 600;">类型</th>
+<th style="background: #3866FF; color: #fff; padding: 8px 10px; border: 1px solid #ddd; text-align: left; font-weight: 600;">说明</th>
+<th style="background: #3866FF; color: #fff; padding: 8px 10px; border: 1px solid #ddd; text-align: left; font-weight: 600;">生命周期</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="padding: 8px 10px; border: 1px solid #ddd;"><code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">scratch</code>（默认）</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">临时目录</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">任务完成后删除，artifacts 保留</td>
+</tr>
+<tr>
+<td style="padding: 8px 10px; border: 1px solid #ddd;"><code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">dir:/path</code></td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">已有目录</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">永久保留</td>
+</tr>
+<tr>
+<td style="padding: 8px 10px; border: 1px solid #ddd;"><code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">worktree:/project</code></td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">Git worktree</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">永久保留，适合编码任务</td>
+</tr>
+</tbody>
+</table>
+<p style="margin: 1.5em 0;">审核任务完成后，<code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">dir:</code> 目录中的最终 Markdown 直接由 Publisher 推送到 GitHub。</p>
+<p style="margin: 1.5em 0;"><span style="font-weight: bold;">4. 人工在环（Human-in-the-Loop）</span>
+Kanban 最强大的特性之一：任何人可以在任何时间点通过 <code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">kanban_comment</code> 或 CLI 的 <code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">hermes kanban comment</code> 在任务上留言。如果 Worker 发现需要人工决策，它可以直接 <code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">kanban_block</code> 并附带问题，等待人工回复后再 <code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">kanban_unblock</code> 继续执行。</p>
+<hr style="border: none; border-top: 1px solid #e0e0e0; margin: 20px 0;">
+<h2 style="font-size: 18px; font-weight: 700; color: #1a1a1a; margin: 20px 0 10px; padding-left: 10px; border-left: 3px solid #3866FF;">五、Kanban Swarm vs 其他多 Agent 方案</h2>
+<p style="margin: 1.5em 0;">理解 Kanban Swarm 的最好方式，是与当前主流的几种多 Agent 协作方案对比：</p>
+<table style="border-collapse: collapse; width: 100%; font-size: 14px; margin: 12px 0;">
+<thead>
+<tr>
+<th style="background: #3866FF; color: #fff; padding: 8px 10px; border: 1px solid #ddd; text-align: left; font-weight: 600;">方案</th>
+<th style="background: #3866FF; color: #fff; padding: 8px 10px; border: 1px solid #ddd; text-align: left; font-weight: 600;">协作模式</th>
+<th style="background: #3866FF; color: #fff; padding: 8px 10px; border: 1px solid #ddd; text-align: left; font-weight: 600;">持久化</th>
+<th style="background: #3866FF; color: #fff; padding: 8px 10px; border: 1px solid #ddd; text-align: left; font-weight: 600;">人工介入</th>
+<th style="background: #3866FF; color: #fff; padding: 8px 10px; border: 1px solid #ddd; text-align: left; font-weight: 600;">适用场景</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="padding: 8px 10px; border: 1px solid #ddd;"><span style="font-weight: bold;">Hermes Kanban</span></td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">对等看板</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">✅ SQLite</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">✅ 原生支持</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">生产级工作流、跨日任务</td>
+</tr>
+<tr>
+<td style="padding: 8px 10px; border: 1px solid #ddd;"><span style="font-weight: bold;">OpenAI Swarm</span></td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">函数调用链</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">❌ 无</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">❌ 无</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">实验性原型</td>
+</tr>
+<tr>
+<td style="padding: 8px 10px; border: 1px solid #ddd;"><span style="font-weight: bold;">AutoGen</span></td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">对话式</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">❌ 无</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">✅ 手动</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">研究、对话式协作</td>
+</tr>
+<tr>
+<td style="padding: 8px 10px; border: 1px solid #ddd;"><span style="font-weight: bold;">CrewAI</span></td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">层级流程</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">❌ 无</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">❌ 无</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">简单顺序任务</td>
+</tr>
+<tr>
+<td style="padding: 8px 10px; border: 1px solid #ddd;"><span style="font-weight: bold;">LangGraph</span></td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">图状态机</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">❌ 内存中</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">❌ 无</td>
+<td style="padding: 8px 10px; border: 1px solid #ddd;">需要精细控制的状态流</td>
+</tr>
+</tbody>
+</table>
+<p style="margin: 1.5em 0;">Kanban 的核心差异在于：<span style="font-weight: bold;">它不是一个"框架"而是一个"基础设施"</span>。它不定义 Agent 之间的通信协议（那是 LLM 自己搞定的），它只提供一个可靠的持久化工作队列——任何语言、任何框架、任何 Agent 只要会读写 SQLite 就能参与。</p>
+<hr style="border: none; border-top: 1px solid #e0e0e0; margin: 20px 0;">
+<h2 style="font-size: 18px; font-weight: 700; color: #1a1a1a; margin: 20px 0 10px; padding-left: 10px; border-left: 3px solid #3866FF;">六、最佳实践与陷阱</h2>
+<h3 style="font-size: 16px; font-weight: 700; color: rgb(0, 181, 173); margin: 1.2em 0 0.5em; padding: 5px 0;">✅ 推荐做法</h3>
+<ol style="margin: 0.8em 0; padding-left: 20px; list-style-type: decimal;">
+<li style="margin: 6px 0;"><span style="font-weight: bold;">为每种角色创建独立 Profile</span>——不同 Profile 拥有不同的模型、记忆和工具集，这是 Kanban Swarm 的设计初衷</li>
+<li style="margin: 6px 0;"><span style="font-weight: bold;">善用 <code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">model_override</code></span>——搜索类任务用便宜的模型，创作和决策类任务用好模型，优化 Token 消耗</li>
+<li style="margin: 6px 0;"><span style="font-weight: bold;">设置合理的 TTL</span>——根据任务复杂度调整 <code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">claim_ttl</code>，太短会导致 Worker 被过早回收，太长会导致崩溃任务长期不释放</li>
+<li style="margin: 6px 0;"><span style="font-weight: bold;">使用 <code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">dir:</code> 工作空间</span>——当任务处理的数据需要长期保留时，用 <code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">dir:/path</code> 替代默认的 <code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">scratch</code>，避免数据丢失</li>
+<li style="margin: 6px 0;"><span style="font-weight: bold;">拥抱人工在环</span>——不要试图让流水线完全自动化。复杂决策节点设置 <code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">kanban_block</code> 等待人工确认，是保证质量的关键</li>
+</ol>
+<h3 style="font-size: 16px; font-weight: 700; color: rgb(0, 181, 173); margin: 1.2em 0 0.5em; padding: 5px 0;">❌ 常见误区</h3>
+<ol style="margin: 0.8em 0; padding-left: 20px; list-style-type: decimal;">
+<li style="margin: 6px 0;"><span style="font-weight: bold;">用 Kanban 做实时交互</span>——Dispatcer 默认 60 秒扫描间隔，不适合需要秒级响应的场景。实时交互请用 <code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">delegate_task</code></li>
+<li style="margin: 6px 0;"><span style="font-weight: bold;">所有任务都用同一个 Profile</span>——身份模糊的 Agent 做不好任何事。给不同角色不同的 Profile</li>
+<li style="margin: 6px 0;"><span style="font-weight: bold;">忽略 Heartbeat</span>——长时间运行的任务应该调用 <code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">kanban_heartbeat</code>，否则被 Dispatcher 误回收会前功尽弃</li>
+<li style="margin: 6px 0;"><span style="font-weight: bold;">单个 Board 塞太多无关任务</span>——不同项目应该用不同的 Board，而不是一个 Board 里塞满杂项。<code style="background: #f0f2f5; color: #d63384; border-radius: 3px; padding: 2px 6px; font-size: 14px; font-family: Menlo, Consolas, monospace;">hermes kanban board create project-name</code> 即可</li>
+</ol>
+<hr style="border: none; border-top: 1px solid #e0e0e0; margin: 20px 0;">
+<h2 style="font-size: 18px; font-weight: 700; color: #1a1a1a; margin: 20px 0 10px; padding-left: 10px; border-left: 3px solid #3866FF;">七、未来展望</h2>
+<p style="margin: 1.5em 0;">从 v0.15.0 到 v0.16.0，Kanban 系统经历了 104+ PR 的重塑。从我的观察来看，Kanban Swarm 正在从"一个实验性功能"进化为"Hermes 多 Agent 编排的默认范式"。</p>
+<p style="margin: 1.5em 0;">几个值得关注的演进方向：</p>
+<ul style="margin: 0.8em 0; padding-left: 20px; list-style-type: disc;">
+<li style="margin: 6px 0;"><span style="font-weight: bold;">跨主机 Board</span>——目前 Kanban 是单机设计，未来可能支持分布式 Board，让不同机器上的 Agent 协作</li>
+<li style="margin: 6px 0;"><span style="font-weight: bold;">动态拓扑重配置</span>——v1 的 Swarm 拓扑是静态生成的，未来的 Dispatcher 可能能在运行时根据任务进度动态调整拓扑</li>
+<li style="margin: 6px 0;"><span style="font-weight: bold;">RAG 增强的任务分解</span>——Orchestrator 可以结合知识库，将用户需求更精确地分解为可执行的子任务</li>
+</ul>
+<hr style="border: none; border-top: 1px solid #e0e0e0; margin: 20px 0;">
+<h2 style="font-size: 18px; font-weight: 700; color: #1a1a1a; margin: 20px 0 10px; padding-left: 10px; border-left: 3px solid #3866FF;">结语</h2>
+<p style="margin: 1.5em 0;">Kanban Swarm 是一个简单但不简陋的设计。它没有引入复杂的新协议，没有要求你学习新的编排语言，没有强迫你改变 Agent 的写作方式——它只是在所有 Agent 之间放了一个 SQLite 数据库，然后说："你们看完留言板上写下你的结果，下一个自然有人接上。"</p>
+<p style="margin: 1.5em 0;">这种"薄层编排"的设计哲学——用最少的约束实现最大的灵活性——正是 Hermes Agent 一直以来的风格。它不是告诉你"应该怎么用 AI Agent"，而是给你一个工具箱，让你自己决定"我的 AI Agent 应该怎么协作"。</p>
+<p style="margin: 1.5em 0;">而对于像我这样需要同时管理多个 AI Agent 的开发者来说，Kanban Swarm 最珍贵的不是那个 Swarm 拓扑生成器，也不是那个 Dispatcher 自动回收机制——而是它让我可以晚上睡觉前创建一个任务，第二天醒来时看到它已经经过了调研、撰写、审核、发布四个节点，整齐地排在我的 GitHub 上。</p>
+<p style="margin: 1.5em 0;"><span style="font-weight: bold;">这就是 AI Agent 基础设施该有的样子：它不在你面前晃悠，但你的活儿干完了。</span></p>
+<hr style="border: none; border-top: 1px solid #e0e0e0; margin: 20px 0;">
+<p style="margin: 1.5em 0;"><em>本文由 Hermes Agent Kanban Swarm 流水线自动生成：researcher 调研 → writer 撰写 → reviewer 审核 → publisher 发布。</em></p>
+<p style="margin: 1.5em 0;"><em>源码仓库：https://github.com/jxlyc050616/hermes-agent-blog</em></p>
